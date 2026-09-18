@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Install or update the voci CLI and TUI for the current user"
+#MISE raw_args=true
+
+set -euo pipefail
+
+exec "$(dirname "${BASH_SOURCE[0]}")/../scripts/xtask" install "$@"

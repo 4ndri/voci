@@ -1,0 +1,36 @@
+flowchart TB
+    subgraph terminal["Terminal prompt"]
+        cli["voci word · optional --from / --to"]
+        launch["voci shell"]
+    end
+
+    subgraph printed["Printed lookup"]
+        candidates["Source word · language direction · useful candidates"]
+    end
+
+    subgraph cliRecovery["Printed problem"]
+        reason["What failed · how to recover"]
+        rerun["Correct word or languages · retry"]
+    end
+
+    subgraph shell["Lookup TUI"]
+        submit["Word input · source/target controls · submit"]
+        current["Current result or actionable problem"]
+        again["Edit word or languages · retry / next lookup"]
+        quit["Exit"]
+    end
+
+    subgraph returned["Terminal prompt"]
+        next["Run next lookup or corrected command"]
+    end
+
+    cli -->|"Found"| candidates
+    cli -->|"Lookup failed"| reason
+    candidates --> next
+    reason --> rerun
+    rerun --> next
+    launch --> submit
+    submit -->|"Shared lookup behavior"| current
+    current --> again
+    again --> submit
+    quit --> next

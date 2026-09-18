@@ -1,0 +1,12 @@
+workflow: GitHubFlow/v1
+mode: ContinuousDelivery
+# Accept stable and named prerelease tags on main without forcing a label.
+label: null
+branches:
+  main:
+    label: null
+tag-prefix: '[vV]?'
+update-build-number: false
+major-version-bump-message: '(?m)^\w+(\([^\r\n]+\))?!:|^BREAKING[ -]CHANGE:'
+minor-version-bump-message: '(?m)^feat(\([^\r\n]+\))?:'
+patch-version-bump-message: '(?m)^(fix|perf)(\([^\r\n]+\))?:'
