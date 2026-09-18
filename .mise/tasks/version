@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Print GitVersion SemVer (use --expect-tag to validate a release tag)"
+#MISE raw_args=true
+set -euo pipefail
+exec "$(dirname "${BASH_SOURCE[0]}")/../scripts/xtask" version "$@"

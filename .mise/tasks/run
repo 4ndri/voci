@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Run voci; pass application arguments after --"
+#MISE raw_args=true
+#MISE raw=true
+set -euo pipefail
+exec "$(dirname "${BASH_SOURCE[0]}")/../scripts/xtask" run "$@"

@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            binary: voci
+            rustflags: ''
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: voci
+            rustflags: ''
+          - os: macos-15
+            target: aarch64-apple-darwin
+            binary: voci
+            rustflags: ''
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            binary: voci.exe
+            rustflags: '-C target-feature=+crt-static'
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      TARGET: ${{ matrix.target }}
+      BINARY: ${{ matrix.binary }}
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Verify release version
+        shell: bash
+        run: mise run version --expect-tag "$RELEASE_TAG"
+      - name: Test
+        shell: bash
+        run: mise run test --target "$TARGET"
+      - name: Build release binary
+        shell: bash
+        run: mise run build --target "$TARGET"
+      - name: Smoke test release binary
+        shell: bash
+        run: |
+          expected_version=$(mise run --quiet version)
+          test "$("target/$TARGET/release/$BINARY" --version)" = "voci $expected_version"
+          "target/$TARGET/release/$BINARY" --help
+          "target/$TARGET/release/$BINARY" shell --help
+      - name: Package executable and documentation
+        shell: bash
+        run: mise run package --target "$TARGET" --no-build --output-dir dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: dist
+        shell: bash
+        run: |
+          archives=( *.tar.gz *.zip )
+          test "${#archives[@]}" -eq 4
+          sha256sum "${archives[@]}" > SHA256SUMS
+          sha256sum --check SHA256SUMS
+      - name: Upload assets and publish
+        shell: bash
+        run: |
+          # A failed upload leaves a draft that a rerun can finish safely.
+          # Published releases are never overwritten by a rerun.
+          if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft); then
+            if [[ "$draft" != true ]]; then
+              echo "Release $RELEASE_TAG is already published; refusing to overwrite it." >&2
+              exit 1
+            fi
+          else
+            flags=()
+            if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
+              flags+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes \
+              --title "voci $RELEASE_TAG" "${flags[@]}"
+          fi
+          gh release upload "$RELEASE_TAG" dist/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false

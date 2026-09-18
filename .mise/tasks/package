@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+#MISE description="Build and package versioned executables (use --help for options)"
+#MISE raw_args=true
+set -euo pipefail
+exec "$(dirname "${BASH_SOURCE[0]}")/../scripts/xtask" package "$@"

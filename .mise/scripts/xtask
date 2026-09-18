@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+
+# Apply offline mode to bootstrapping xtask as well as its Cargo subprocess.
+# Avoid empty arrays: Bash 3.2 on macOS treats them as unset under set -u.
+for argument in "$@"; do
+  [[ "$argument" == "--" ]] && break
+  if [[ "$argument" == "--offline" ]]; then
+    exec cargo --offline xtask "$@"
+  fi
+done
+exec cargo xtask "$@"
