@@ -44,9 +44,10 @@ async fn main() -> ExitCode {
         return fail(2, "A lookup word cannot be combined with a subcommand.");
     }
     if let Some(Command::History(options) | Command::Search { options, .. }) = &cli.command {
-        let store = match voci::history::default_path() {
+        let store = match voci::config::history_path(cli.config.as_deref(), cli.database.as_deref())
+        {
             Ok(path) => HistoryStore::new(path),
-            Err(e) => return fail(1, &e),
+            Err(e) => return fail(1, &e.to_string()),
         };
         let filter = HistoryFilter {
             today: options.today,
@@ -74,7 +75,7 @@ async fn main() -> ExitCode {
     if let Err(e) = cli.validate() {
         return fail(e.exit_code(), &e.to_string());
     }
-    let mut coordinator = Coordinator::new(cli.config.clone(), cli.provider);
+    let mut coordinator = Coordinator::new(cli.config.clone(), cli.provider, cli.database.clone());
     if let Some(request) = cli.request() {
         let (cancel, receiver) = tokio::sync::watch::channel(false);
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();

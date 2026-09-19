@@ -21,9 +21,16 @@ pub struct Coordinator {
     pub config: Option<Arc<Config>>,
 }
 impl Coordinator {
-    pub fn new(config_path: Option<PathBuf>, provider_override: Option<ProviderName>) -> Self {
+    pub fn new(
+        config_path: Option<PathBuf>,
+        provider_override: Option<ProviderName>,
+        database: Option<PathBuf>,
+    ) -> Self {
+        let history = crate::config::history_path(config_path.as_deref(), database.as_deref())
+            .map(HistoryStore::new)
+            .map_err(|e| e.to_string());
         Self {
-            history: crate::history::default_path().map(HistoryStore::new),
+            history,
             config_path,
             provider_override,
             config: None,

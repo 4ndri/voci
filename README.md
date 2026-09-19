@@ -131,6 +131,10 @@ Configuration is optional. Create a `config.toml` at the applicable location:
 provider = "wikdict"
 target_language = "en"
 
+[history]
+# Optional; relative paths are resolved beside this config.toml:
+# database = "data/voci.db"
+
 [wikdict]
 # Optional directory containing the versioned dictionary folder:
 # data_dir = "/path/to/dictionaries"
@@ -172,34 +176,64 @@ Every valid submission records a start and then an outcome. Misses, ambiguous/un
 
 | Platform | History database |
 | --- | --- |
-| Linux | `$XDG_DATA_HOME/voci/history.sqlite3`, or `~/.local/share/voci/history.sqlite3` |
-| macOS | `~/Library/Application Support/voci/history.sqlite3` |
-| Windows | `%LOCALAPPDATA%\voci\data\history.sqlite3` |
+| Linux | `$XDG_DATA_HOME/voci/voci.db`, or `~/.local/share/voci/voci.db` |
+| macOS | `~/Library/Application Support/voci/voci.db` |
+| Windows | `%LOCALAPPDATA%\voci\data\voci.db` |
 
 The database is created on the first valid submission and is independent of dictionary files, working directory, and `[wikdict].data_dir`. It stores queries, language selections, provider identity, timestamps, outcomes, full successful results, and attribution. This is persistent personal data; credentials and raw provider responses are not stored. SQLite may also create `-wal` and `-shm` sidecars. Do not delete or replace this database when recovering dictionary downloads.
+
+Override the database with `[history].database` in `config.toml`, or `--database PATH` on any lookup, `shell`, `history`, or `search` command. The flag takes precedence; relative flag paths use the working directory, while relative config paths use the config file's directory. History commands read only the history settings and never initialize a provider. Unreadable or malformed history configuration produces an error rather than silently selecting a different database; `--database` can bypass that configuration for history reads.
+
+```sh
+voci --database /tmp/voci-test.db shell
+voci --database /tmp/voci-test.db history
+```
+
+The default filename is now `voci.db`. An existing `history.sqlite3` is left intact and is not migrated or merged automatically. To keep using it, set `[history].database` to its path or pass `--database /path/to/history.sqlite3`.
 
 An absent database is normal empty history. Storage problems show the database location and a warning while retaining useful lookup output; they do not change the lookup exit status. A missing final write can leave an unfinished entry. History commands themselves report an unreadable database as an error. Use `voci -- history` or `voci -- search` to look up those literal words.
 
 ## TUI
 
-`voci shell` requires an interactive terminal on stdin and stdout. Optional `--from`, `--to`, `--provider`, and `--config` flags work before or after `shell`. The app opens on **lookup** with the word field ready for typing. Source/target choices and unfinished input remain local to the session.
+`voci shell` requires an interactive terminal on stdin and stdout. Optional `--from`, `--to`, `--provider`, `--config`, and `--database` flags work before or after `shell`. The app opens on **lookup** with the word field ready for typing. Source/target choices and unfinished input remain local to the session.
 
 **Lookup** keeps the word, language selectors, and current result, with up to five recent encounters at the bottom. Selecting a recent encounter previews its stored result or failure in the details area without modifying the input. Escape leaves a saved preview. Submitting a word performs a new lookup and records a new attempt.
 
 **History** shows paged encounters and their full details. Wide terminals place details to the right; narrower terminals stack them below. Small terminals show the focused list or details pane. Selection and filters survive tab switches. `/` opens a filter dialog for text and All history/Today; Apply commits changes, Clear resets its fields, and Cancel preserves the previous filters. `Ctrl-r` refreshes history and retries a storage read after a problem is resolved.
 
-Navigation mode uses Vim-style bindings. Letter shortcuts are ordinary characters while editing text. Escape dismisses a dialog or key sequence, cancels an active lookup, leaves editing, or closes a saved preview; it does not quit. The status area shows the current mode and active bindings.
+Inputs have **NORMAL**, **INSERT**, and **VISUAL** modes. In normal mode, `Enter` or `i` enters insert mode at the cursor; `a` enters insert mode after the current character (a whole Unicode grapheme), or at the end if already there; `Enter` in insert mode submits the lookup or applies the filter. Letter shortcuts are ordinary characters in insert mode. In normal mode, Left/Right and configured direction keys move the cursor, and Home/End bindings move to either end. `p` inserts clipboard text at the cursor without submitting. Multiline/control-character paste is rejected without changing the field.
+
+`v` starts character selection; move with arrow/profile keys, word motions, or Home/End, then `y` copies, `d`/`x` cuts, `c` cuts and enters insert mode, or `p` replaces the selection from the clipboard. In normal mode, `d` and `x` cut the character under the cursor. The desktop clipboard serves as the shared register for cut/copy/paste; a cut at the end of an empty field does nothing. Selection respects Unicode graphemes, including combining accents. `v` or Escape leaves visual mode. Copy/cut failures preserve the selection and text. These are small Vim-style editing modes; operator sequences and named registers are not implemented.
+
+`b` / `Ctrl-Left` jumps back to a word beginning; `e` / `Ctrl-Right` jumps forward to a word end. Ctrl-arrow word motions also work in insert mode, where the caret lands after the word's last character. Normal/visual word-end motions land on the last character, so visual selections include it. Words group Unicode letters, digits, and underscores; punctuation forms separate runs and whitespace separates them. In Neo Noted inputs, `b` means word-begin; `Home` and `gg` still reach the start of the field, and `b` retains its Home action in lists.
+
+`u` undoes and `Ctrl-r` redoes in normal input mode. Each insert session is one undo step; normal-mode cuts, pastes, and visual replacements are separate steps. A visual `c` change and its subsequent typing undo together as one step. If copying the selection fails, `c` leaves the text, selection, and visual mode intact. Up to 100 steps are kept per input, and a new edit after undo discards redo. Undo/redo restore text and cursor without changing the clipboard or saved lookup history. Reopening the filter starts from its applied text with a fresh undo history. In the history list, `Ctrl-r` still refreshes results.
+
+Normal and visual inputs use a steady block cursor; insert inputs use a steady I-beam. Voci resets the terminal's default cursor shape on exit and panic. Cursor-shape support depends on the terminal.
+
+`Ctrl-w` toggles persistent **PANE** mode, including from insert mode. Arrow keys and configured direction keys then change focus without modifying fields. Pane mode stays active across repeated moves and pauses until Enter, Escape or `Ctrl-w`; leaving it returns to normal mode. Inside the filter dialog it moves between the dialog's controls. The dialog uses the same bordered text fields and cyan focus borders as Lookup, with separate Date, Apply, Clear, and Cancel controls. Enter leaving pane mode only confirms focus; press it again to edit or activate the selected control.
+
+Escape first leaves pane mode, a pending key sequence, or a text-editing mode. In a filter text field, the first Escape returns to normal mode and another closes the dialog. Existing lookup cancellation and saved-preview dismissal remain available. The status area shows the current mode and active bindings.
 
 | Default keys | Action |
 | --- | --- |
 | `gt` / `gT` | Next / previous tab |
 | `Tab` / `Shift-Tab` | Next / previous control or pane |
-| `Ctrl-w` then an arrow or configured direction | Focus a pane in that direction |
+| `Ctrl-w`, then arrows or configured directions | Enter persistent pane selection; `Enter`, `Esc` or `Ctrl-w` exits |
 | Arrow keys or `h/j/k/l` | Navigate controls, entries, or candidates |
 | `Home` / `gg`, `End` / `G` | First / last matching entry or candidate |
 | `PageUp` / `PageDown` | Move five entries or candidates |
-| `i` | Edit the lookup word |
-| `Enter` | Submit a word, apply a dialog, or focus selected encounter details |
+| `i`, or `Enter` on an input in normal mode | Enter insert mode |
+| `u` / `Ctrl-r` on an input in normal mode | Undo / redo input edits |
+| `a` on an input in normal mode | Enter insert mode after the current character |
+| `p` in an input in normal mode | Paste clipboard text at the cursor |
+| `b` / `Ctrl-Left`, `e` / `Ctrl-Right` | Previous word beginning / next word end in text fields |
+| `Ctrl-Left` / `Ctrl-Right` in insert mode | Move the insertion caret by word |
+| `d` / `x` in normal or visual input mode | Cut the current character or selection to the clipboard |
+| `c` in visual input mode | Cut selection to clipboard and enter insert mode |
+| `v`, then movement and `y` / `d` / `x` / `p` | Select text, then copy / cut / replace |
+| `Enter` in insert mode or on a dialog button | Submit a word or apply a dialog action |
+| `Enter` on a history entry | Focus its details |
 | `/`, `Ctrl-r` | History filters, refresh |
 | `yy` | Copy the highlighted translation from the details pane |
 | `ya` / `yq` | Copy all translation values / the selected query |
@@ -242,14 +276,17 @@ end = ["End", "G", "l"]
 
 Each array lists alternative bindings. `gg` is two successive lowercase presses; `G` is uppercase. Letters come from your active layout, not QWERTY key positions. An explicit array replaces that action's defaults; omitted actions retain defaults. Keep named keys in the array when you want arrows or Home/End alongside letter shortcuts. Empty arrays, unknown actions, and conflicting complete/prefix bindings are rejected. Shared prefixes such as `gg` and `gt` are supported with a 750 ms inter-key timeout.
 
-`[navigation]` also accepts `page_up` and `page_down`. `[actions]` accepts `next_tab`, `previous_tab`, `pane_prefix`, `edit`, `submit`, `next_focus`, `previous_focus`, `filter`, `copy_value`, `copy_all`, `copy_query`, `refresh`, `quit`, and `cancel`. For example:
+`[navigation]` also accepts `page_up` and `page_down`. `[actions]` accepts `next_tab`, `previous_tab`, `pane_prefix`, `edit`, `append`, `undo`, `redo`, `paste`, `word_begin`, `word_end`, `visual`, `yank_selection`, `delete_selection`, `change_selection`, `submit`, `next_focus`, `previous_focus`, `filter`, `copy_value`, `copy_all`, `copy_query`, `refresh`, `quit`, and `cancel`. For example:
 
 ```toml
 [actions]
 copy_query = ["yq", "Alt-q"]
+word_begin = ["Ctrl-Left", "b"]
+word_end = ["Ctrl-Right", "e"]
+delete_selection = ["d", "x"]
 ```
 
-Named keys include `Left`, `Right`, `Up`, `Down`, `Home`, `End`, `PageUp`, `PageDown`, `Enter`, `Tab`, `Esc`, and `Space`, with `Ctrl-`, `Alt-`, or `Shift-` modifiers. Space-separated tokens can express modified sequences; compact character sequences such as `yy` also work. Text fields retain ordinary editing behavior; navigation letter sequences do not execute there. Ctrl-C remains reserved for emergency exit. Profiles reload on the next launch; there is no profile inheritance or live editor.
+Named keys include `Left`, `Right`, `Up`, `Down`, `Home`, `End`, `PageUp`, `PageDown`, `Enter`, `Tab`, `Esc`, and `Space`, with `Ctrl-`, `Alt-`, or `Shift-` modifiers. Space-separated tokens can express modified sequences; compact character sequences such as `yy` also work. Input shortcuts are active in normal/visual modes; insert mode retains ordinary typing and cursor editing. Word-motion bindings take precedence over navigation aliases inside input fields; conflicting input actions are still rejected. Modified word bindings also work in insert mode. Existing profile files are preserved; add `x` to an explicit `delete_selection = ["d"]` override to enable both cut keys. `pane_prefix` names the pane-mode toggle for compatibility with existing profiles. Copy-selection bindings are resolved in visual mode, separately from result-copy sequences such as `yy`. Ctrl-C remains reserved for emergency exit. Profiles reload on the next launch; there is no profile inheritance or live editor.
 
 ## CLI errors
 
@@ -273,3 +310,5 @@ cargo test --locked --test live_microsoft -- --ignored --nocapture
 Review the printed candidates and latency, especially multiple meanings for `Verbindlichkeit` and `liability`, ambiguous `Gift`, inflections, and misses. Successful automated assertions alone do not establish dictionary quality. Record findings in [provider validation](docs/pitches/lookup/provider-validation.md).
 
 The application service owns validation and language resolution. The provider adapters own WikDict files/SQL and Microsoft HTTP payloads. The shared coordinator records append-only history events around provider setup and lookup. CLI/TUI presentation uses structured results and safe terminal text. History tests use isolated temporary application-data directories; no provider registry or machine-translation fallback is introduced.
+
+Lookup and filter fields share an [edtui](https://github.com/preiter93/edtui) editor through `src/tui/input.rs`. edtui owns the text buffer, modal state, selections, and editing actions. The adapter maps voci's configurable bindings to these actions, preserves paste-at-cursor behavior, and commits cuts only after clipboard copying succeeds. Since edtui 0.11 uses Unicode scalar positions, the adapter keeps grapheme-aware motions and terminal rendering for combining accents and emoji. Its default key handler is not enabled: the configured voci actions remain the supported shortcuts. Optional edtui syntax highlighting, mouse handling, and system clipboard features are disabled; voci retains its shared clipboard service. The adapter groups edtui snapshots into user edits and tracks available redo steps because edtui 0.11 does not invalidate its redo stack on a new edit.

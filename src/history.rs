@@ -145,14 +145,12 @@ pub fn default_path() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
     {
-        return Ok(path.join("voci/data/history.sqlite3"));
+        return Ok(path.join("voci/data/voci.db"));
     }
 
     directories::ProjectDirs::from("", "", "voci")
-        .map(|d| d.data_local_dir().join("history.sqlite3"))
-        .ok_or_else(|| {
-            "Cannot resolve the user application data directory for history.sqlite3.".into()
-        })
+        .map(|d| d.data_local_dir().join("voci.db"))
+        .ok_or_else(|| "Cannot resolve the user application data directory for voci.db.".into())
 }
 pub fn fold(value: &str) -> String {
     value.nfd().default_case_fold().nfc().collect()

@@ -20,6 +20,16 @@ pub enum Action {
     PreviousTab,
     Pane,
     Edit,
+    Append,
+    Undo,
+    Redo,
+    Paste,
+    WordBegin,
+    WordEnd,
+    Visual,
+    YankSelection,
+    DeleteSelection,
+    ChangeSelection,
     Submit,
     NextFocus,
     PreviousFocus,
@@ -31,12 +41,29 @@ pub enum Action {
     Quit,
     Cancel,
 }
+#[derive(Clone, Copy)]
+pub enum Context {
+    Lookup = 1,
+    History = 2,
+    Input = 4,
+    Visual = 8,
+    Pane = 16,
+}
 impl Action {
     fn contexts(self) -> u8 {
         match self {
+            Self::Left | Self::Right | Self::Up | Self::Down | Self::Pane | Self::Cancel => 31,
             Self::Filter | Self::Refresh => 2,
-            Self::Edit => 1,
-            _ => 3,
+            Self::Edit => 1 | 4 | 8,
+            Self::Append | Self::Undo | Self::Redo => 4,
+            Self::Paste
+            | Self::Visual
+            | Self::WordBegin
+            | Self::WordEnd
+            | Self::DeleteSelection => 4 | 8,
+            Self::YankSelection | Self::ChangeSelection => 8,
+            Self::CopyValue | Self::CopyAll | Self::CopyQuery => 1 | 2 | 4,
+            _ => 1 | 2 | 4 | 8,
         }
     }
 }
@@ -65,6 +92,7 @@ struct Binding {
     action: Action,
     keys: Vec<Key>,
     label: String,
+    contexts: u8,
 }
 #[derive(Clone, Debug)]
 pub struct Keybindings {
@@ -92,6 +120,16 @@ fn defaults() -> Vec<(&'static str, Action, Vec<&'static str>)> {
         ("previous_tab", Action::PreviousTab, vec!["gT"]),
         ("pane_prefix", Action::Pane, vec!["Ctrl-w"]),
         ("edit", Action::Edit, vec!["i"]),
+        ("append", Action::Append, vec!["a"]),
+        ("undo", Action::Undo, vec!["u"]),
+        ("redo", Action::Redo, vec!["Ctrl-r"]),
+        ("paste", Action::Paste, vec!["p"]),
+        ("word_begin", Action::WordBegin, vec!["Ctrl-Left", "b"]),
+        ("word_end", Action::WordEnd, vec!["Ctrl-Right", "e"]),
+        ("visual", Action::Visual, vec!["v"]),
+        ("yank_selection", Action::YankSelection, vec!["y"]),
+        ("delete_selection", Action::DeleteSelection, vec!["d", "x"]),
+        ("change_selection", Action::ChangeSelection, vec!["c"]),
         ("submit", Action::Submit, vec!["Enter"]),
         ("next_focus", Action::NextFocus, vec!["Tab"]),
         ("previous_focus", Action::PreviousFocus, vec!["Shift-Tab"]),
@@ -139,6 +177,7 @@ impl Keybindings {
                     action,
                     keys,
                     label,
+                    contexts: action.contexts(),
                 });
             }
         }
@@ -147,9 +186,34 @@ impl Keybindings {
                 "Unknown keybinding action; check [navigation] and [actions] names.".into(),
             );
         }
+        // Input word motions take precedence over navigation aliases only in inputs.
+        // In particular, Neo Noted's `b` still means Home in lists, but word-begin in text.
+        let word_keys = bindings
+            .iter()
+            .filter(|b| matches!(b.action, Action::WordBegin | Action::WordEnd))
+            .map(|b| b.keys.clone())
+            .collect::<Vec<_>>();
+        for binding in &mut bindings {
+            if matches!(
+                binding.action,
+                Action::Left
+                    | Action::Right
+                    | Action::Up
+                    | Action::Down
+                    | Action::Home
+                    | Action::End
+                    | Action::PageUp
+                    | Action::PageDown
+            ) && word_keys
+                .iter()
+                .any(|keys| keys.starts_with(&binding.keys) || binding.keys.starts_with(keys))
+            {
+                binding.contexts &= !(Context::Input as u8 | Context::Visual as u8);
+            }
+        }
         for (i, a) in bindings.iter().enumerate() {
             for b in &bindings[i + 1..] {
-                if a.action.contexts() & b.action.contexts() != 0
+                if a.contexts & b.contexts != 0
                     && (a.keys.starts_with(&b.keys) || b.keys.starts_with(&a.keys))
                 {
                     return Err(format!(
@@ -221,6 +285,17 @@ impl Keybindings {
             .iter()
             .any(|b| b.action == action && b.keys == [key])
     }
+    pub fn insert_motion(&self, key: KeyEvent) -> Option<Action> {
+        if !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            return None;
+        }
+        [Action::WordBegin, Action::WordEnd]
+            .into_iter()
+            .find(|action| self.direct(key, *action))
+    }
 }
 fn parse_sequence(value: &str) -> Result<Vec<Key>, String> {
     fn named(token: &str) -> Option<Key> {
@@ -285,16 +360,14 @@ pub struct Resolver {
     pending: Vec<Key>,
     last: Option<Instant>,
     context: u8,
-    pane: bool,
 }
 impl Resolver {
     pub fn reset(&mut self) {
         self.pending.clear();
         self.last = None;
-        self.pane = false;
     }
     pub fn pending(&self) -> bool {
-        (!self.pending.is_empty() || self.pane)
+        !self.pending.is_empty()
             && self
                 .last
                 .is_some_and(|last| last.elapsed() < Duration::from_millis(750))
@@ -303,10 +376,10 @@ impl Resolver {
         &mut self,
         bindings: &Keybindings,
         event: KeyEvent,
-        history: bool,
+        context: Context,
         now: Instant,
-    ) -> Option<(Action, bool)> {
-        let context = if history { 2 } else { 1 };
+    ) -> Option<Action> {
+        let context = context as u8;
         if self.context != context
             || self
                 .last
@@ -321,33 +394,18 @@ impl Resolver {
             bindings
                 .bindings
                 .iter()
-                .filter(|b| b.action.contexts() & context != 0 && b.keys.starts_with(keys))
+                .filter(|b| b.contexts & context != 0 && b.keys.starts_with(keys))
                 .collect::<Vec<_>>()
         };
         let mut matches = candidates(&self.pending);
         if matches.is_empty() {
             self.pending = vec![Key::event(event)];
-            self.pane = false;
             matches = candidates(&self.pending);
         }
         if let Some(binding) = matches.iter().find(|b| b.keys == self.pending) {
             let action = binding.action;
             self.pending.clear();
-            if action == Action::Pane {
-                self.pane = true;
-                return None;
-            }
-            let pane = self.pane;
-            self.pane = false;
-            if pane
-                && !matches!(
-                    action,
-                    Action::Left | Action::Right | Action::Up | Action::Down
-                )
-            {
-                return None;
-            }
-            return Some((action, pane));
+            return Some(action);
         }
         if matches.is_empty() {
             self.reset();
@@ -367,26 +425,38 @@ mod tests {
         let b = Keybindings::parse(NEO).unwrap();
         let mut r = Resolver::default();
         let now = Instant::now();
-        assert_eq!(r.feed(&b, key('g'), true, now), None);
-        assert_eq!(r.feed(&b, key('g'), true, now), Some((Action::Home, false)));
-        assert_eq!(r.feed(&b, key('b'), true, now), Some((Action::Home, false)));
-        assert_eq!(r.feed(&b, key('l'), true, now), Some((Action::End, false)));
-        assert_eq!(r.feed(&b, key('G'), true, now), Some((Action::End, false)));
-        assert_eq!(r.feed(&b, key('h'), true, now), None);
+        assert_eq!(r.feed(&b, key('g'), Context::History, now), None);
+        assert_eq!(
+            r.feed(&b, key('g'), Context::History, now),
+            Some(Action::Home)
+        );
+        assert_eq!(
+            r.feed(&b, key('b'), Context::History, now),
+            Some(Action::Home)
+        );
+        assert_eq!(
+            r.feed(&b, key('l'), Context::History, now),
+            Some(Action::End)
+        );
+        assert_eq!(
+            r.feed(&b, key('G'), Context::History, now),
+            Some(Action::End)
+        );
+        assert_eq!(r.feed(&b, key('h'), Context::History, now), None);
         assert_eq!(
             r.feed(
                 &b,
                 KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
-                true,
+                Context::History,
                 now
             ),
-            None
+            Some(Action::Pane)
         );
-        assert_eq!(r.feed(&b, key('t'), true, now), Some((Action::Left, true)));
-        r.feed(&b, key('g'), true, now);
+        assert_eq!(r.feed(&b, key('t'), Context::Pane, now), Some(Action::Left));
+        r.feed(&b, key('g'), Context::History, now);
         assert_eq!(
-            r.feed(&b, key('t'), true, now + Duration::from_secs(1)),
-            Some((Action::Left, false))
+            r.feed(&b, key('t'), Context::History, now + Duration::from_secs(1)),
+            Some(Action::Left)
         );
         assert!(Keybindings::parse("[navigation]\nhome=['g']").is_err());
         assert!(Keybindings::parse("[navigation]\nleft=['i']").is_err());
@@ -406,5 +476,40 @@ mod tests {
         .unwrap();
         assert_eq!(b.label(Action::Home), "Home/b");
         assert!(std::fs::read_to_string(profile).unwrap().contains("'b'"));
+    }
+    #[test]
+    fn input_word_motions_shadow_navigation_only_in_text_contexts() {
+        let bindings = Keybindings::parse(NEO).unwrap();
+        let mut resolver = Resolver::default();
+        let now = Instant::now();
+        assert_eq!(
+            resolver.feed(&bindings, key('b'), Context::History, now),
+            Some(Action::Home)
+        );
+        assert_eq!(
+            resolver.feed(&bindings, key('b'), Context::Input, now),
+            Some(Action::WordBegin)
+        );
+        assert_eq!(
+            resolver.feed(&bindings, key('b'), Context::Visual, now),
+            Some(Action::WordBegin)
+        );
+        assert_eq!(resolver.feed(&bindings, key('b'), Context::Pane, now), None);
+        assert_eq!(
+            resolver.feed(&bindings, key('g'), Context::Input, now),
+            None
+        );
+        assert_eq!(
+            resolver.feed(&bindings, key('g'), Context::Input, now),
+            Some(Action::Home)
+        );
+        assert!(Keybindings::parse("[actions]\nword_begin=['b']\nword_end=['b']").is_err());
+        let remapped =
+            Keybindings::parse("[actions]\nword_begin=['Alt-b']\nword_end=['Alt-f']").unwrap();
+        assert_eq!(
+            remapped.insert_motion(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)),
+            Some(Action::WordEnd)
+        );
+        assert_eq!(remapped.insert_motion(key('b')), None);
     }
 }

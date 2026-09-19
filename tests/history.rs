@@ -13,6 +13,17 @@ use voci::{
     history::*,
 };
 
+#[test]
+fn bundled_sqlite_includes_wal_reset_fix() {
+    // Concurrent WAL writers/checkpoints need the upstream fix introduced in 3.51.3.
+    // https://www.sqlite.org/wal.html#walresetbug
+    assert!(
+        rusqlite::version_number() >= 3_051_003,
+        "SQLite {} predates the required WAL-reset fix; upgrade the bundled dependency",
+        rusqlite::version()
+    );
+}
+
 fn request(query: &str) -> LookupRequest {
     LookupRequest {
         query: query.into(),
@@ -47,17 +58,17 @@ fn result(query: &str) -> LookupResult {
 }
 fn db_path(home: &Path) -> PathBuf {
     if cfg!(target_os = "windows") {
-        home.join("voci/data/history.sqlite3")
+        home.join("voci/data/voci.db")
     } else if cfg!(target_os = "macos") {
-        home.join("Library/Application Support/voci/history.sqlite3")
+        home.join("Library/Application Support/voci/voci.db")
     } else {
-        home.join("voci/history.sqlite3")
+        home.join("voci/voci.db")
     }
 }
 #[tokio::test]
 async fn immutable_events_preserve_repeats_complete_results_and_unfinished_attempts() {
     let root = tempfile::tempdir().unwrap();
-    let store = HistoryStore::new(root.path().join("history.sqlite3"));
+    let store = HistoryStore::new(root.path().join("voci.db"));
     assert!(
         store
             .page(HistoryFilter::default(), None, 20, false)
@@ -121,7 +132,7 @@ async fn immutable_events_preserve_repeats_complete_results_and_unfinished_attem
 #[tokio::test]
 async fn literal_unicode_filters_apply_before_limit_and_keyset_pages_go_both_ways() {
     let root = tempfile::tempdir().unwrap();
-    let store = HistoryStore::new(root.path().join("history.sqlite3"));
+    let store = HistoryStore::new(root.path().join("voci.db"));
     for query in ["older", "Verbindlichkeit", "newer"] {
         let id = store.start(request(query), None).await.unwrap();
         store
@@ -195,7 +206,7 @@ async fn literal_unicode_filters_apply_before_limit_and_keyset_pages_go_both_way
 #[tokio::test]
 async fn concurrent_writers_and_storage_failures_preserve_data() {
     let root = tempfile::tempdir().unwrap();
-    let store = HistoryStore::new(root.path().join("history.sqlite3"));
+    let store = HistoryStore::new(root.path().join("voci.db"));
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..8 {
         let store = store.clone();
@@ -245,7 +256,7 @@ async fn concurrent_writers_and_storage_failures_preserve_data() {
 #[tokio::test]
 async fn coordinator_records_setup_failures_and_cancellation_but_not_invalid_input() {
     let root = tempfile::tempdir().unwrap();
-    let store = HistoryStore::new(root.path().join("history.sqlite3"));
+    let store = HistoryStore::new(root.path().join("voci.db"));
     let config = Config::from_sources(Some("provider='microsoft'"), None, None).unwrap();
     let coordinator = Coordinator {
         history: Ok(store.clone()),
@@ -283,7 +294,6 @@ fn cli_history_is_independent_of_config_and_provider_and_has_literal_reserved_wo
         vec!["history"],
         vec!["--provider", "microsoft", "history"],
         vec!["search", "verbindlich", "--today", "--limit", "20"],
-        vec!["--config", "absent.toml", "history"],
     ] {
         support::command()
             .args(args)
@@ -291,6 +301,11 @@ fn cli_history_is_independent_of_config_and_provider_and_has_literal_reserved_wo
             .success()
             .stdout(predicate::str::contains("No saved lookups"));
     }
+    support::command()
+        .args(["--config", "absent.toml", "history"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Cannot read"));
     for args in [
         vec!["history", "--limit", "0"],
         vec!["search", ""],
@@ -311,6 +326,124 @@ fn cli_history_is_independent_of_config_and_provider_and_has_literal_reserved_wo
             .stderr(predicate::str::contains("VOCI_MICROSOFT_KEY"));
     }
 }
+#[tokio::test]
+async fn configured_database_is_shared_by_lookup_and_history_without_touching_defaults() {
+    let home = tempfile::tempdir().unwrap();
+    let configs = home.path().join("settings");
+    std::fs::create_dir(&configs).unwrap();
+    let config = configs.join("config.toml");
+    std::fs::write(
+        &config,
+        "provider='microsoft'\n[history]\ndatabase='data/custom.db'\n",
+    )
+    .unwrap();
+    let custom = configs.join("data/custom.db");
+    let mut lookup = support::command();
+    support::isolate(&mut lookup, home.path());
+    lookup
+        .current_dir(home.path())
+        .arg("--config")
+        .arg(&config)
+        .arg("Verbindlichkeit")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("VOCI_MICROSOFT_KEY"));
+    assert!(custom.exists());
+    assert!(!db_path(home.path()).exists());
+    // History only needs its own config section, not valid provider settings.
+    std::fs::write(
+        &config,
+        "provider='unavailable'\ntarget_language='fr'\n[history]\ndatabase='data/custom.db'\n",
+    )
+    .unwrap();
+    let mut history = support::command();
+    support::isolate(&mut history, home.path());
+    history
+        .current_dir(home.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["search", "Verbindlichkeit"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Verbindlichkeit"));
+    let override_path = home.path().join("override.db");
+    let mut lookup = support::command();
+    support::isolate(&mut lookup, home.path());
+    lookup
+        .arg("--database")
+        .arg(&override_path)
+        .arg("--config")
+        .arg(&config)
+        .arg("other")
+        .assert()
+        .failure();
+    assert!(override_path.exists());
+    assert_eq!(
+        HistoryStore::new(custom.clone())
+            .page(HistoryFilter::default(), None, 20, false)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    let mut history = support::command();
+    support::isolate(&mut history, home.path());
+    history
+        .args(["history", "--config", "missing.toml", "--database"])
+        .arg(&override_path)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("other"));
+    assert!(!db_path(home.path()).exists());
+    // Invalid database configuration must never silently fall back to the default.
+    std::fs::write(&config, "[history]\ndatabase=''\n").unwrap();
+    let mut history = support::command();
+    support::isolate(&mut history, home.path());
+    history
+        .arg("--config")
+        .arg(&config)
+        .arg("history")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be empty"));
+    assert!(!db_path(home.path()).exists());
+}
+
+#[tokio::test]
+async fn legacy_database_is_preserved_and_can_be_selected_explicitly() {
+    let home = tempfile::tempdir().unwrap();
+    let legacy = db_path(home.path()).with_file_name("history.sqlite3");
+    let store = HistoryStore::new(legacy.clone());
+    store.start(request("legacy word"), None).await.unwrap();
+    let mut default = support::command();
+    support::isolate(&mut default, home.path());
+    default
+        .arg("history")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No saved lookups"));
+    assert!(!db_path(home.path()).exists());
+    let mut explicit = support::command();
+    support::isolate(&mut explicit, home.path());
+    explicit
+        .arg("--database")
+        .arg(&legacy)
+        .arg("history")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("legacy word"));
+    assert_eq!(
+        store
+            .page(HistoryFilter::default(), None, 20, false)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+}
+
 #[tokio::test]
 async fn cli_prints_all_candidates_and_searches_existing_events() {
     let home = tempfile::tempdir().unwrap();
@@ -430,7 +563,7 @@ async fn sigint_records_cancellation_and_preserves_exit_status() {
 #[tokio::test]
 async fn equal_timestamps_use_event_order_and_terminal_outcomes_do_not_reorder_attempts() {
     let root = tempfile::tempdir().unwrap();
-    let store = HistoryStore::new(root.path().join("history.sqlite3"));
+    let store = HistoryStore::new(root.path().join("voci.db"));
     let id = store.start(request("real"), None).await.unwrap();
     let connection = rusqlite::Connection::open(store.path()).unwrap();
     let time = chrono::Utc::now().timestamp_micros();
@@ -477,7 +610,7 @@ async fn lookup_failure_and_cancellation_remain_visible_when_storage_is_unavaila
     std::fs::write(&blocked, "not a directory").unwrap();
     let config = Config::from_sources(Some("provider='microsoft'"), None, None).unwrap();
     let coordinator = Coordinator {
-        history: Ok(HistoryStore::new(blocked.join("history.sqlite3"))),
+        history: Ok(HistoryStore::new(blocked.join("voci.db"))),
         config_path: None,
         provider_override: None,
         config: Some(Arc::new(config)),
@@ -489,5 +622,5 @@ async fn lookup_failure_and_cancellation_remain_visible_when_storage_is_unavaila
         Err(LookupError::Configuration(_))
     ));
     assert_eq!(completion.warnings.len(), 1);
-    assert!(completion.warnings[0].contains("history.sqlite3"));
+    assert!(completion.warnings[0].contains("voci.db"));
 }

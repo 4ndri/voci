@@ -24,6 +24,9 @@ pub struct Cli {
     /// Read a specific TOML configuration file
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
+    /// Use a specific history database (overrides [history].database)
+    #[arg(long, global = true, value_name = "PATH")]
+    pub database: Option<PathBuf>,
     /// Dictionary source (default: wikdict, or the configured provider)
     #[arg(long, global = true, value_enum)]
     pub provider: Option<ProviderName>,

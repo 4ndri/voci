@@ -9,5 +9,20 @@ left = ["Left", "t"]
 right = ["Right", "r"]
 up = ["Up", "m"]
 down = ["Down", "n"]
+# In inputs, b means word-begin; Home/gg still reach the beginning of the field.
 home = ["Home", "gg", "b"]
 end = ["End", "G", "l"]
+
+# Input actions apply in normal/visual modes; letters are text in insert mode.
+[actions]
+undo = ["u"] # Normal input only.
+redo = ["Ctrl-r"] # Normal input; Ctrl-r still refreshes the history list.
+append = ["a"] # Normal input: enter insert mode after the current character.
+pane_prefix = ["Ctrl-w"] # Toggle persistent pane selection; Esc also exits.
+paste = ["p"]
+visual = ["v"]
+change_selection = ["c"] # Visual: cut selection and enter insert mode.
+yank_selection = ["y"]
+delete_selection = ["d", "x"]
+word_begin = ["Ctrl-Left", "b"]
+word_end = ["Ctrl-Right", "e"]

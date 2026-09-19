@@ -15,6 +15,61 @@ struct FileConfig {
     microsoft: MicrosoftConfig,
     wikdict: WikDictConfig,
     tui: TuiConfig,
+    history: HistoryConfig,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct HistoryConfig {
+    database: Option<PathBuf>,
+}
+
+/// Read only history settings, without validating or initializing a lookup provider.
+pub fn history_path(
+    config: Option<&Path>,
+    database: Option<&Path>,
+) -> Result<PathBuf, LookupError> {
+    if let Some(path) = database {
+        return checked_database_path(path.to_owned());
+    }
+    #[derive(Default, Deserialize)]
+    #[serde(default)]
+    struct HistoryOnly {
+        history: HistoryConfig,
+    }
+    let path = config
+        .map(Path::to_owned)
+        .map(Ok)
+        .unwrap_or_else(default_path)?;
+    let settings: HistoryOnly = match fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).map_err(|_| LookupError::Configuration(
+            "Cannot read history settings from config.toml. Expected [history].database as a path; use --database PATH to override.".into()
+        ))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && config.is_none() => HistoryOnly::default(),
+        Err(_) => return Err(LookupError::Configuration(format!(
+            "Cannot read {}. Check the path and file permissions, or use --database PATH.", path.display()
+        ))),
+    };
+    if let Some(database) = settings.history.database {
+        let database = checked_database_path(database)?;
+        return Ok(if database.is_absolute() {
+            database
+        } else {
+            path.parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(database)
+        });
+    }
+    crate::history::default_path().map_err(LookupError::Configuration)
+}
+
+fn checked_database_path(path: PathBuf) -> Result<PathBuf, LookupError> {
+    if path.as_os_str().is_empty() {
+        return Err(LookupError::Configuration(
+            "History database path cannot be empty.".into(),
+        ));
+    }
+    Ok(path)
 }
 
 #[derive(Default, Deserialize)]
@@ -129,7 +184,7 @@ impl Config {
     ) -> Result<Self, LookupError> {
         let file: FileConfig = match content {
             // Don't echo the parser's source snippet: the file could contain a misplaced secret.
-            Some(content) => toml::from_str(content).map_err(|_| LookupError::Configuration("Invalid config.toml. Expected provider, target_language, optional [wikdict].data_dir, [microsoft].region and [tui].keybindings; keys belong only in VOCI_MICROSOFT_KEY.".into()))?,
+            Some(content) => toml::from_str(content).map_err(|_| LookupError::Configuration("Invalid config.toml. Expected provider, target_language, optional [wikdict].data_dir, [microsoft].region, [history].database and [tui].keybindings; keys belong only in VOCI_MICROSOFT_KEY.".into()))?,
             None => FileConfig::default(),
         };
         let target_language = file
@@ -142,6 +197,9 @@ impl Config {
             })?;
         let key = key.filter(|key| !key.trim().is_empty());
         let region = region_override.or(file.microsoft.region);
+        if let Some(path) = file.history.database {
+            checked_database_path(path)?;
+        }
         Ok(Self {
             provider: file.provider,
             target_language,

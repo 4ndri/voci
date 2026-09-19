@@ -22,16 +22,16 @@ Capture structured results before presentation shortens them. A word with severa
 
 **Append-only event history.** A dedicated SQLite database in the user's application data directory is the source of truth for lookup history, separate from downloaded dictionary databases. Create it on the first valid submission. Dictionary replacement or re-download must not erase history.
 
-Name the database `history.sqlite3`, under voci's local application data directory:
+Name the database `voci.db`, under voci's local application data directory:
 
 | Environment | Database path |
 | --- | --- |
-| Linux, with an absolute `XDG_DATA_HOME` | `$XDG_DATA_HOME/voci/history.sqlite3` |
-| Linux, otherwise | `~/.local/share/voci/history.sqlite3` |
-| macOS | `~/Library/Application Support/voci/history.sqlite3` |
-| Windows | `%LOCALAPPDATA%\voci\data\history.sqlite3` |
+| Linux, with an absolute `XDG_DATA_HOME` | `$XDG_DATA_HOME/voci/voci.db` |
+| Linux, otherwise | `~/.local/share/voci/voci.db` |
+| macOS | `~/Library/Application Support/voci/voci.db` |
+| Windows | `%LOCALAPPDATA%\voci\data\voci.db` |
 
-These paths follow the existing application's `ProjectDirs::from("", "", "voci").data_local_dir()` convention. Use the same database from every working directory and from both CLI and TUI. It is user data, not a cache, and `[wikdict].data_dir` does not relocate it. If the user data directory cannot be resolved or written, explain the storage problem rather than falling back to the current directory. History reads with no database remain a normal empty state.
+These paths follow the existing application's `ProjectDirs::from("", "", "voci").data_local_dir()` convention. Use the same database from every working directory and from both CLI and TUI. It is user data, not a cache, and `[wikdict].data_dir` does not relocate it. If the user data directory cannot be resolved or written, explain the storage problem rather than falling back to the current directory. History reads with no database remain a normal empty state. `[history].database` can select another path; relative paths resolve beside the effective config file. `--database PATH` overrides that setting for lookup, shell, history, and search, with relative flag paths resolved against the working directory. Development and manual TUI checks use an isolated database. Existing `history.sqlite3` files remain intact and can be selected explicitly; they are not automatically moved or merged.
 
 
 Each attempt has an immutable start event and, when available, a terminal outcome event. A history entry combines them. Their data includes these fields:
@@ -75,7 +75,7 @@ Previewing does not replace an unfinished input or change the lookup language co
 
 Read the event history in bounded portions, with filters applied to the full history before fetching. Refresh when returning to History while preserving the selected event if it still matches. History remains reachable when dictionary setup or provider configuration prevents new lookups; shell startup must allow that separation.
 
-**Filter dialog.** In History navigation mode, `/` opens a dialog over the current view. Offer a text field for query/translation matching and an All history/Today choice, using the CLI's search and local-day semantics. Apply commits the filters; Clear resets the dialog's fields; Cancel or `Esc` leaves the prior filters intact. Show active filters above the list. Empty matches invite adjusting or clearing filters; an absent database says no lookups are saved yet. A storage failure is a separate actionable state with its path and a retry, while the user can still return to Lookup.
+**Filter dialog.** In History navigation mode, `/` opens a dialog over the current view. Offer a text field for query/translation matching and an All history/Today choice, using the CLI's search and local-day semantics. Apply commits the filters; Clear resets the dialog's fields; Cancel leaves the prior filters intact. In the text field, `Esc` first returns to normal mode; another `Esc` closes the dialog without applying. Show active filters above the list. Empty matches invite adjusting or clearing filters; an absent database says no lookups are saved yet. A storage failure is a separate actionable state with its path and a retry, while the user can still return to Lookup.
 
 **Copy from saved details.** In either tab, let the user copy the saved query, the selected translation value, or all translation values. Failed and unfinished attempts allow query copying; translation copying is unavailable without a result. Copy plain text, with multiple values separated by newlines, without timestamps or presentation decorations. One-value copy acts on the highlighted candidate in the details pane; query/all-values copy acts on the selected encounter. Show brief success or clipboard-unavailable feedback. A copy action must not silently report success when the terminal environment cannot supply a clipboard.
 
@@ -84,10 +84,12 @@ Read the event history in bounded portions, with filters applied to the full his
 | Context | Keys | Action |
 | --- | --- | --- |
 | Navigation | `gt` / `gT` | Next / previous tab. |
-| Navigation | `Ctrl-w` then an arrow or configured direction key | Focus a pane in that direction. |
+| Navigation / editing | `Ctrl-w`, then arrows or configured directions | Enter persistent pane selection; `Esc` or `Ctrl-w` leaves it. |
 | Lists / details | `↑` / `↓` or configured Up / Down; `Home` / `End` or configured Home / End | Move through entries or candidates; first / last. |
 | Navigation controls | `←` / `→` or configured Left / Right | Move within a horizontal control, such as language or date choices. |
-| Lookup navigation | `i` | Focus and edit the word input. |
+| Input navigation | `i` or `Enter` | Enter insert mode in the focused input; Enter in insert mode submits/applies. |
+| Input normal mode | `p`, `v` | Paste clipboard text at the cursor, or start character selection. |
+| Input visual mode | Movement, then `y` / `d` / `p` | Copy / cut / replace the selection; `Esc` or `v` returns to normal. |
 | History navigation | `/` | Open the filter dialog. |
 | Details navigation | `yy` | Copy the selected translation value. |
 | Selected encounter | `ya` / `yq` | Copy all translation values / the saved query. |
@@ -106,9 +108,9 @@ The navigation mappings are:
 | Home / first | `Home` | `gg` | `gg`, `b` |
 | End / last | `End` | `G` | `G`, `l` |
 
-Use these same configured direction keys after the pane-focus prefix: for Neo Noted, `Ctrl-w` then `t` / `r` / `m` / `n` focuses left / right / up / down. `Ctrl-w` then an arrow works too. A profile replaces the letter mappings for each action it defines, rather than layering Neo Noted letters over QWERTY navigation. In Neo Noted, `l` means End and `r` means Right; `d` and `h` have no navigation assignment. Arrow and Home/End bindings remain available alongside letter remaps. Match the characters delivered by the active keyboard layout, not assumed QWERTY physical key positions.
+Use these same configured direction keys after the pane-focus prefix: for Neo Noted, `Ctrl-w` then `t` / `r` / `m` / `n` focuses left / right / up / down. `Ctrl-w` then an arrow works too. Pane mode remains active across repeated moves and pauses until `Esc` or `Ctrl-w`; it is not a timed prefix. A profile replaces the letter mappings for each action it defines, rather than layering Neo Noted letters over QWERTY navigation. In Neo Noted, `l` means End and `r` means Right; `d` and `h` have no navigation assignment. Arrow and Home/End bindings remain available alongside letter remaps. Match the characters delivered by the active keyboard layout, not assumed QWERTY physical key positions.
 
-Start Lookup with its word field ready for typing. Letter shortcuts only act in navigation contexts; `t`, `r`, `m`, `n`, `b`, `l`, `G`, `q`, `/`, and multi-key sequences must remain ordinary input while editing. In text fields, arrows and Home/End keep their normal cursor-editing behavior. Tab / Shift-Tab also move focus between controls. `Esc` first handles the active dialog, edit, or preview rather than quitting unexpectedly. Existing cancellation remains available for an in-flight lookup.
+Start Lookup with its word field ready for typing. Letter shortcuts only act in navigation contexts; `t`, `r`, `m`, `n`, `b`, `l`, `G`, `q`, `/`, and multi-key sequences must remain ordinary input while editing. In insert mode, arrows and Home/End keep their normal cursor-editing behavior. In normal and visual input modes, the configured direction/Home/End bindings also move the cursor; selection and paste operate on whole Unicode graphemes. Clipboard failures preserve text and selection, and multiline paste is rejected. This is a bounded editing model, without full Vim operators or named registers. Normal input mode supports configurable `u` undo and `Ctrl-r` redo; history-list `Ctrl-r` remains refresh. Input `b`/`Ctrl-Left` and `e`/`Ctrl-Right` move by word, including Ctrl-arrows in insert mode. `d`/`x` cut the selection or current grapheme to the clipboard. Word bindings override navigation aliases only inside inputs; Neo Noted `b` still means Home in lists. Normal/visual input cursors are blocks and insert cursors are I-beams. Tab / Shift-Tab also move focus between controls. `Esc` first handles the active dialog, edit, or preview rather than quitting unexpectedly. Existing cancellation remains available for an in-flight lookup.
 
 **Predefined keybinding files.** Keep profiles in a `keybindings/` folder beside the user’s `config.toml`, and select one by file path:
 
