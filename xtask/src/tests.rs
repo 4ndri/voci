@@ -318,7 +318,7 @@ fn shallow_checkout_fails_before_invoking_gitversion() {
 }
 
 #[test]
-fn gitversion_conventional_commits_and_detached_tags() {
+fn gitversion_conventional_commits_main_pushes_and_detached_tags() {
     if Command::new("gitversion").arg("-version").output().is_err() {
         assert!(
             env::var_os("CI").is_none(),
@@ -329,7 +329,7 @@ fn gitversion_conventional_commits_and_detached_tags() {
     }
     let temporary = git_fixture();
     let root = temporary.path();
-    let calculate = |expected: Option<&str>, github: bool| {
+    let calculate = |expected: Option<&str>, github_ref: Option<&str>| {
         let mut command = gitversion_command(root);
         for (key, _) in env::vars_os() {
             let name = key.to_string_lossy();
@@ -337,10 +337,10 @@ fn gitversion_conventional_commits_and_detached_tags() {
                 command.env_remove(key);
             }
         }
-        if github {
+        if let Some(github_ref) = github_ref {
             command
                 .env("GITHUB_ACTIONS", "true")
-                .env("GITHUB_REF", "refs/tags/v2.0.0-beta.1")
+                .env("GITHUB_REF", github_ref)
                 .env("GITHUB_SHA", git(root, &["rev-parse", "HEAD"]))
                 .env("GITHUB_REPOSITORY", "test/voci")
                 .env("GITHUB_WORKSPACE", root)
@@ -351,17 +351,24 @@ fn gitversion_conventional_commits_and_detached_tags() {
             .version
     };
     git(root, &["tag", "v1.2.3"]);
-    assert_eq!(calculate(Some("v1.2.3"), false), "1.2.3");
+    assert_eq!(calculate(Some("v1.2.3"), None), "1.2.3");
     git(
         root,
         &["commit", "--allow-empty", "-m", "fix: repair lookup"],
     );
-    assert!(calculate(None, false).starts_with("1.2.4"));
+    let release_version = calculate(None, Some("refs/heads/main"));
+    assert!(release_version.starts_with("1.2.4"));
+    assert_eq!(release_version, calculate(None, None));
+    // Publishing creates a tag from the calculated version, after the build.
+    git(root, &["tag", &format!("v{release_version}")]);
+    assert_eq!(calculate(None, Some("refs/heads/main")), release_version);
     git(root, &["commit", "--allow-empty", "-m", "feat: add lookup"]);
-    assert!(calculate(None, false).starts_with("1.3.0"));
+    let next_version = calculate(None, Some("refs/heads/main"));
+    assert!(next_version.starts_with("1.3.0"));
+    assert_ne!(next_version, release_version);
     git(root, &["tag", "v1.3.0"]);
     git(root, &["checkout", "--detach", "v1.3.0"]);
-    assert_eq!(calculate(Some("v1.3.0"), false), "1.3.0");
+    assert_eq!(calculate(Some("v1.3.0"), None), "1.3.0");
     git(root, &["checkout", "main"]);
     git(
         root,
@@ -372,9 +379,12 @@ fn gitversion_conventional_commits_and_detached_tags() {
             "feat!: incompatible lookup",
         ],
     );
-    assert!(calculate(None, false).starts_with("2.0.0"));
+    assert!(calculate(None, None).starts_with("2.0.0"));
     git(root, &["tag", "v2.0.0-beta.1"]);
     git(root, &["checkout", "--detach", "v2.0.0-beta.1"]);
-    assert_eq!(calculate(Some("v2.0.0-beta.1"), false), "2.0.0-beta.1");
-    assert_eq!(calculate(Some("v2.0.0-beta.1"), true), "2.0.0-beta.1");
+    assert_eq!(calculate(Some("v2.0.0-beta.1"), None), "2.0.0-beta.1");
+    assert_eq!(
+        calculate(Some("v2.0.0-beta.1"), Some("refs/tags/v2.0.0-beta.1")),
+        "2.0.0-beta.1"
+    );
 }

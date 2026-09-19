@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v[0-9]*'
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -13,8 +13,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  version:
+    name: Calculate release version
+    runs-on: ubuntu-24.04
+    outputs:
+      semver: ${{ steps.gitversion.outputs.semver }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Calculate GitVersion SemVer
+        id: gitversion
+        shell: bash
+        run: |
+          version=$(mise run --quiet version)
+          echo "semver=$version" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build ${{ matrix.target }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -37,7 +57,7 @@ jobs:
             binary: voci.exe
             rustflags: '-C target-feature=+crt-static'
     env:
-      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_VERSION: ${{ needs.version.outputs.semver }}
       TARGET: ${{ matrix.target }}
       BINARY: ${{ matrix.binary }}
       RUSTFLAGS: ${{ matrix.rustflags }}
@@ -53,7 +73,7 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Verify release version
         shell: bash
-        run: mise run version --expect-tag "$RELEASE_TAG"
+        run: test "$(mise run --quiet version)" = "$RELEASE_VERSION"
       - name: Test
         shell: bash
         run: mise run test --target "$TARGET"
@@ -63,8 +83,7 @@ jobs:
       - name: Smoke test release binary
         shell: bash
         run: |
-          expected_version=$(mise run --quiet version)
-          test "$("target/$TARGET/release/$BINARY" --version)" = "voci $expected_version"
+          test "$("target/$TARGET/release/$BINARY" --version)" = "voci $RELEASE_VERSION"
           "target/$TARGET/release/$BINARY" --help
           "target/$TARGET/release/$BINARY" shell --help
       - name: Package executable and documentation
@@ -80,14 +99,14 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_REPO: ${{ github.repository }}
-      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_TAG: v${{ needs.version.outputs.semver }}
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -117,7 +136,7 @@ jobs:
             if [[ "${RELEASE_TAG%%+*}" == *-* ]]; then
               flags+=(--prerelease)
             fi
-            gh release create "$RELEASE_TAG" --verify-tag --draft --generate-notes \
+            gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" --draft --generate-notes \
               --title "voci $RELEASE_TAG" "${flags[@]}"
           fi
           gh release upload "$RELEASE_TAG" dist/* --clobber
