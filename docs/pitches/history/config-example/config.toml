@@ -1,0 +1,5 @@
+# Example configuration: choose a keybinding profile.
+[tui]
+keybindings = "keybindings/neo-noted.keybinding.toml"
+# To select the conventional Vim profile instead:
+# keybindings = "keybindings/qwerty.keybinding.toml"
