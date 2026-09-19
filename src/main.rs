@@ -5,26 +5,32 @@ use std::{
     sync::Arc,
 };
 use voci::{
-    app::LookupService,
-    cli::Cli,
-    config::{Config, ProviderName},
+    cli::{Cli, Command},
+    config::Config,
+    coordinator::Coordinator,
+    history::{HistoryFilter, HistoryStore},
+    keybindings::Keybindings,
     presentation::{render_result, safe_text},
-    provider::Provider,
     tui,
-    wikdict::WikDictProvider,
 };
-
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
-            // Clap may echo untrusted arguments; sanitize errors before printing.
             let code = error.exit_code() as u8;
             if code == 0 {
                 let _ = error.print();
             } else {
-                eprintln!("{}", safe_multiline(&error.to_string()));
+                eprintln!(
+                    "{}",
+                    error
+                        .to_string()
+                        .lines()
+                        .map(safe_text)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
             }
             return ExitCode::from(code);
         }
@@ -34,68 +40,97 @@ async fn main() -> ExitCode {
         println!();
         return ExitCode::SUCCESS;
     }
-    if let Err(error) = cli.validate() {
-        return fail(error.exit_code(), &error.to_string());
+    if cli.word.is_some() && cli.command.is_some() {
+        return fail(2, "A lookup word cannot be combined with a subcommand.");
     }
-    if cli.command.is_some()
-        && let Err(error) = tui::check_terminal()
-    {
-        return fail(1, &error.to_string());
-    }
-    let config = match Config::load(cli.config.as_deref()) {
-        Ok(config) => config,
-        Err(error) => return fail(error.exit_code(), &error.to_string()),
-    };
-    let provider = match cli.provider.unwrap_or(config.provider) {
-        ProviderName::Wikdict => {
-            let directory = match config.wikdict_dir() {
-                Ok(path) => path,
-                Err(error) => return fail(error.exit_code(), &error.to_string()),
-            };
-            let provider = WikDictProvider::new(directory);
-            tokio::select! {
-                result = provider.prepare(|message| eprintln!("{}", safe_text(message))) => {
-                    if let Err(error) = result { return fail(error.exit_code(), &error.to_string()); }
-                },
-                _ = tokio::signal::ctrl_c() => return ExitCode::from(130),
-            }
-            Provider::WikDict(provider)
-        }
-        ProviderName::Microsoft => match config.microsoft() {
-            Ok(provider) => Provider::Microsoft(provider),
-            Err(error) => return fail(error.exit_code(), &error.to_string()),
-        },
-    };
-    let service = Arc::new(LookupService::new(provider, config.target_language));
-    if let Some(request) = cli.request() {
-        tokio::select! {
-            result = service.lookup(request) => match result {
-                Ok(result) => match io::stdout().lock().write_all(render_result(&result).as_bytes()) {
-                    Ok(()) => ExitCode::SUCCESS,
-                    Err(error) if error.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
-                    Err(_) => fail(1, "Cannot write lookup results to standard output."),
-                },
-                Err(error) => fail(error.exit_code(), &error.to_string()),
+    if let Some(Command::History(options) | Command::Search { options, .. }) = &cli.command {
+        let store = match voci::history::default_path() {
+            Ok(path) => HistoryStore::new(path),
+            Err(e) => return fail(1, &e),
+        };
+        let filter = HistoryFilter {
+            today: options.today,
+            text: match &cli.command {
+                Some(Command::Search { text, .. }) => text.clone(),
+                _ => String::new(),
             },
-            _ = tokio::signal::ctrl_c() => ExitCode::from(130),
+        };
+        return match store.page(filter, None, options.limit, false).await {
+            Ok(page) => {
+                let text = if page.entries.is_empty() {
+                    "No saved lookups match.\n".to_owned()
+                } else {
+                    page.entries
+                        .iter()
+                        .map(voci::presentation::render_history)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                output(&text)
+            }
+            Err(e) => fail(1, &e.to_string()),
+        };
+    }
+    if let Err(e) = cli.validate() {
+        return fail(e.exit_code(), &e.to_string());
+    }
+    let mut coordinator = Coordinator::new(cli.config.clone(), cli.provider);
+    if let Some(request) = cli.request() {
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let operation = coordinator.run(request, receiver, Some(progress_tx));
+        tokio::pin!(operation);
+        let completion = loop {
+            tokio::select! {
+                completion=&mut operation=>break completion,
+                _=tokio::signal::ctrl_c()=>{let _=cancel.send(true);},
+                Some(message)=progress_rx.recv()=>eprintln!("{}",safe_text(&message)),
+            }
+        };
+        for warning in completion.warnings {
+            eprintln!("{}", safe_text(&warning));
+        }
+        match completion.result {
+            Ok(result) => output(&render_result(&result)),
+            Err(e) => fail(e.exit_code(), &e.to_string()),
         }
     } else {
-        match tui::run(service, cli.from, cli.to).await {
+        if let Err(e) = tui::check_terminal() {
+            return fail(1, &e.to_string());
+        }
+        let config = match Config::load(cli.config.as_deref()) {
+            Ok(config) => config,
+            Err(e) => return fail(e.exit_code(), &e.to_string()),
+        };
+        let config_path = match cli
+            .config
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(voci::config::default_path)
+        {
+            Ok(path) => path,
+            Err(e) => return fail(e.exit_code(), &e.to_string()),
+        };
+        let (bindings, warnings) =
+            match Keybindings::load(&config_path, config.keybindings.as_deref()) {
+                Ok(v) => v,
+                Err(e) => return fail(1, &e),
+            };
+        coordinator.config = Some(Arc::new(config));
+        match tui::run(Arc::new(coordinator), cli.from, cli.to, bindings, warnings).await {
             Ok(()) => ExitCode::SUCCESS,
-            Err(error) => fail(1, &error.to_string()),
+            Err(e) => fail(1, &e.to_string()),
         }
     }
 }
-
+fn output(text: &str) -> ExitCode {
+    match io::stdout().lock().write_all(text.as_bytes()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(_) => fail(1, "Cannot write results to standard output."),
+    }
+}
 fn fail(code: u8, message: &str) -> ExitCode {
     eprintln!("{}", safe_text(message));
     ExitCode::from(code)
-}
-
-fn safe_multiline(message: &str) -> String {
-    message
-        .lines()
-        .map(safe_text)
-        .collect::<Vec<_>>()
-        .join("\n")
 }

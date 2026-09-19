@@ -1,13 +1,7 @@
-use assert_cmd::{Command, cargo::cargo_bin_cmd};
+#[path = "support/commands.rs"]
+mod support;
 use predicates::prelude::*;
-
-fn command() -> Command {
-    let mut command = cargo_bin_cmd!("voci");
-    command
-        .env_remove("VOCI_MICROSOFT_KEY")
-        .env_remove("VOCI_MICROSOFT_REGION");
-    command
-}
+use support::command;
 
 #[test]
 fn help_version_and_bare_command_do_not_require_config() {

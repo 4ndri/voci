@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::{fmt, str::FromStr};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Language {
     German,
     English,
@@ -33,7 +34,7 @@ impl FromStr for Language {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguagePair {
     pub from: Language,
     pub to: Language,
@@ -56,20 +57,20 @@ pub const INITIAL_PAIRS: [LanguagePair; 2] = [
     },
 ];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LookupRequest {
     pub query: String,
     pub from: Option<Language>,
     pub to: Option<Language>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResultKind {
     Dictionary,
     MachineTranslation,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TranslationCandidate {
     pub text: String,
     pub normalized: String,
@@ -79,7 +80,7 @@ pub struct TranslationCandidate {
     pub back_translations: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LookupResult {
     pub query: String,
     pub headword: String,
@@ -93,6 +94,8 @@ pub struct LookupResult {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LookupError {
+    #[error("Lookup cancelled.")]
+    Cancelled,
     #[error("{0}")]
     InvalidInput(String),
     #[error("Unsupported language '{0}'. Supported directions: de → en, en → de.")]
@@ -140,6 +143,7 @@ pub enum LookupError {
 impl LookupError {
     pub fn exit_code(&self) -> u8 {
         match self {
+            Self::Cancelled => 130,
             Self::InvalidInput(_) | Self::UnsupportedLanguage(_) | Self::UnsupportedPair(_) => 2,
             _ => 1,
         }

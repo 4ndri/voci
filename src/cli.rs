@@ -1,14 +1,13 @@
 use crate::config::ProviderName;
 use crate::domain::{Language, LanguagePair, LookupError, LookupRequest, validate_query};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
     version = option_env!("VOCI_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
     about = "Quick German ↔ English dictionary lookup",
-    disable_help_subcommand = true,
-    args_conflicts_with_subcommands = true
+    disable_help_subcommand = true
 )]
 pub struct Cli {
     /// Word to look up (use -- shell for the literal word "shell")
@@ -34,10 +33,46 @@ pub struct Cli {
 pub enum Command {
     /// Open the interactive lookup TUI
     Shell,
+    /// Browse saved lookup attempts
+    History(HistoryArgs),
+    /// Search saved queries and translations
+    Search {
+        #[arg(value_parser = nonempty)]
+        text: String,
+        #[command(flatten)]
+        options: HistoryArgs,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct HistoryArgs {
+    #[arg(long)]
+    pub today: bool,
+    #[arg(long, default_value="20", value_parser=positive)]
+    pub limit: usize,
+}
+fn positive(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|n| *n > 0 && *n < i64::MAX as usize)
+        .ok_or_else(|| "Limit must be a positive integer.".into())
+}
+fn nonempty(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() || value.chars().any(char::is_control) {
+        Err("Enter nonempty search text without control characters.".into())
+    } else {
+        Ok(value.to_owned())
+    }
 }
 
 impl Cli {
     pub fn validate(&self) -> Result<(), LookupError> {
+        if self.word.is_some() && self.command.is_some() {
+            return Err(LookupError::InvalidInput(
+                "A lookup word cannot be combined with a subcommand.".into(),
+            ));
+        }
         if let (Some(from), Some(to)) = (self.from, self.to)
             && from == to
         {

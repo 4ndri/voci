@@ -14,6 +14,13 @@ struct FileConfig {
     target_language: Option<String>,
     microsoft: MicrosoftConfig,
     wikdict: WikDictConfig,
+    tui: TuiConfig,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct TuiConfig {
+    keybindings: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, ValueEnum)]
@@ -43,9 +50,18 @@ pub struct Config {
     pub key: Option<String>,
     pub region: Option<String>,
     pub wikdict_data_dir: Option<PathBuf>,
+    pub keybindings: Option<PathBuf>,
 }
 
 pub fn default_path() -> Result<PathBuf, LookupError> {
+    #[cfg(windows)]
+    if let Some(path) = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        return Ok(path.join("voci/config/config.toml"));
+    }
+
     ProjectDirs::from("", "", "voci")
         .map(|dirs| dirs.config_dir().join("config.toml"))
         .ok_or_else(|| {
@@ -113,7 +129,7 @@ impl Config {
     ) -> Result<Self, LookupError> {
         let file: FileConfig = match content {
             // Don't echo the parser's source snippet: the file could contain a misplaced secret.
-            Some(content) => toml::from_str(content).map_err(|_| LookupError::Configuration("Invalid config.toml. Expected provider, target_language, optional [wikdict].data_dir and [microsoft].region; keys belong only in VOCI_MICROSOFT_KEY.".into()))?,
+            Some(content) => toml::from_str(content).map_err(|_| LookupError::Configuration("Invalid config.toml. Expected provider, target_language, optional [wikdict].data_dir, [microsoft].region and [tui].keybindings; keys belong only in VOCI_MICROSOFT_KEY.".into()))?,
             None => FileConfig::default(),
         };
         let target_language = file
@@ -132,6 +148,7 @@ impl Config {
             key,
             region,
             wikdict_data_dir: file.wikdict.data_dir,
+            keybindings: file.tui.keybindings,
         })
     }
 }

@@ -73,3 +73,40 @@ pub fn result_lines(result: &LookupResult) -> Vec<String> {
 pub fn render_result(result: &LookupResult) -> String {
     format!("{}\n", result_lines(result).join("\n"))
 }
+
+pub fn render_history(entry: &crate::history::HistoryEntry) -> String {
+    let mut lines = vec![
+        format!(
+            "{} · {} · {}",
+            safe_text(&entry.query),
+            crate::history::display_time(entry.started_at),
+            entry.status()
+        ),
+        format!(
+            "{} → {} · {}",
+            entry.from.map_or("?", |l| l.code()),
+            entry.to.map_or("?", |l| l.code()),
+            safe_text(entry.provider.as_deref().unwrap_or("unknown provider"))
+        ),
+    ];
+    if let Some(time) = entry.finished_at {
+        lines.push(format!("Finished {}", crate::history::display_time(time)));
+    }
+    if let Some(result) = entry.result() {
+        for (i, c) in result.candidates.iter().enumerate() {
+            let value = crate::clipboard::values(result, Some(i)).unwrap_or_default();
+            let sense = c
+                .sense
+                .as_ref()
+                .map(|s| format!(" · {}", safe_text(s)))
+                .unwrap_or_default();
+            lines.push(format!("{}. {value}{sense}", i + 1));
+        }
+        if let Some(attribution) = &result.attribution {
+            lines.push(safe_text(attribution));
+        }
+    } else if let Some(message) = entry.finished.as_ref().and_then(|f| f.message.as_ref()) {
+        lines.push(safe_text(message));
+    }
+    format!("{}\n", lines.join("\n"))
+}

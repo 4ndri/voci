@@ -1,0 +1,13 @@
+# Voci keybinding profile. Unspecified actions retain shared defaults.
+# Arrays contain alternative bindings for the same action.
+# "gg" is a two-key sequence; "G" is an uppercase character.
+# Navigation letters do not act as shortcuts while editing text.
+# Other actions retain the shared defaults described in the pitch.
+
+[navigation]
+left = ["Left", "h"]
+right = ["Right", "l"]
+up = ["Up", "k"]
+down = ["Down", "j"]
+home = ["Home", "gg"]
+end = ["End", "G"]

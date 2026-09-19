@@ -1,4 +1,5 @@
-use assert_cmd::cargo::cargo_bin_cmd;
+#[path = "support/commands.rs"]
+mod support;
 use predicates::prelude::*;
 use rusqlite::{Connection, functions::FunctionFlags};
 use std::{path::Path, time::Duration};
@@ -319,7 +320,7 @@ fn cli_defaults_to_keyless_wikdict_and_supports_provider_overrides() {
     let mut value = toml::Value::Table(value);
     value["wikdict"]["data_dir"] = toml::Value::String(root.path().to_str().unwrap().into());
     std::fs::write(&config, toml::to_string(&value).unwrap()).unwrap();
-    let mut command = cargo_bin_cmd!("voci");
+    let mut command = support::command();
     command
         .env_remove("VOCI_MICROSOFT_KEY")
         .env("VOCI_MICROSOFT_REGION", "irrelevant invalid region")
@@ -333,7 +334,7 @@ fn cli_defaults_to_keyless_wikdict_and_supports_provider_overrides() {
         )
         .stderr("");
     for (query, expected) in [("STRASSE", "street"), ("GRÜSSE", "greetings")] {
-        cargo_bin_cmd!("voci")
+        support::command()
             .arg("--config")
             .arg(&config)
             .arg(query)
@@ -342,7 +343,7 @@ fn cli_defaults_to_keyless_wikdict_and_supports_provider_overrides() {
             .stdout(predicate::str::contains(format!("1. {expected}")))
             .stderr("");
     }
-    let mut command = cargo_bin_cmd!("voci");
+    let mut command = support::command();
     command
         .env_remove("VOCI_MICROSOFT_KEY")
         .arg("--config")
@@ -356,7 +357,7 @@ fn cli_defaults_to_keyless_wikdict_and_supports_provider_overrides() {
         .unwrap()
         .insert("provider".into(), toml::Value::String("microsoft".into()));
     std::fs::write(&config, toml::to_string(&value).unwrap()).unwrap();
-    let mut command = cargo_bin_cmd!("voci");
+    let mut command = support::command();
     command
         .env_remove("VOCI_MICROSOFT_KEY")
         .arg("--config")
