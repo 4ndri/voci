@@ -72,16 +72,11 @@ For run/test task options, use `--task-help`; `--help` is forwarded to the app o
 
 ## Publishing a release
 
-The release workflow runs only when a version tag is pushed; CI continues to run only on pull requests. Merge the release tooling and desired changes first, then tag the commit to publish. No Cargo version bump or bot commit/push is needed:
+The release workflow runs automatically on pushes to `main`; CI continues to run on pull requests. Merge the desired changes to publish. No manual tag or Cargo version bump is needed.
 
-```sh
-git tag -a v0.1.0 -m "Release v0.1.0"
-git push origin v0.1.0
-```
+The workflow fetches full Git history and calculates GitVersion's `SemVer` before building. Every platform verifies that its calculated version matches that shared version. Publishing creates the corresponding `v<SemVer>` tag at the exact commit that triggered the workflow, even if `main` has advanced in the meantime, and uses that tag as the release title (for example, `v0.1.0`). Existing release tags remain part of GitVersion's history for calculating subsequent versions. Use `mise run version` to preview the calculated version locally. The `main` branch uses GitVersion's `ContinuousDeployment` mode to produce stable versions without a prerelease commit counter; local feature branches receive prerelease labels.
 
-Use the intended release version for subsequent tags. `mise run version` shows the calculated version before tagging, and `mise run version --expect-tag v0.1.0` validates a tag on the tagged checkout. The workflow fetches full Git history and requires an exact match between the tag and `v` plus GitVersion's `SemVer`. A tag such as `v0.2.0-beta.1` becomes a prerelease. Local feature branches receive GitVersion's prerelease labels.
-
-Each platform calls `mise run test`, `mise run build`, and `mise run package --no-build`, and verifies that the executable reports the GitVersion version before packaging it. After every build succeeds, the workflow generates combined SHA-256 checksums and release notes, uploads all assets to a draft, and publishes it. It uses GitHub's built-in token; no publishing secret is required. Failed uploads leave a draft that can be completed by rerunning the workflow. Published releases are never overwritten; use a new version for fixes.
+Each platform calls `mise run test`, `mise run build`, and `mise run package --no-build`, and verifies that the executable reports the GitVersion version before packaging it. After every build succeeds, the workflow generates combined SHA-256 checksums and release notes, uploads all assets to a draft, and publishes it. It uses GitHub's built-in token; no publishing secret is required. Failed uploads leave a draft that can be completed by rerunning the workflow. Published releases are never overwritten; merge fixes to `main` for GitVersion to calculate the next release.
 
 ## WikDict: first run and offline lookup
 

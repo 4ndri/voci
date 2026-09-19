@@ -1,10 +1,10 @@
 workflow: GitHubFlow/v1
 mode: ContinuousDelivery
-# Accept stable and named prerelease tags on main without forcing a label.
-label: null
 branches:
   main:
-    label: null
+    # Every push to main is released, so omit the prerelease commit counter.
+    mode: ContinuousDeployment
+    label: ''
 tag-prefix: '[vV]?'
 update-build-number: false
 major-version-bump-message: '(?m)^\w+(\([^\r\n]+\))?!:|^BREAKING[ -]CHANGE:'
