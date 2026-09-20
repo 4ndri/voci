@@ -333,6 +333,38 @@ fn cli_defaults_to_keyless_wikdict_and_supports_provider_overrides() {
             predicate::str::contains("1. liability").and(predicate::str::contains("CC BY-SA 4.0")),
         )
         .stderr("");
+    let output = support::command()
+        .arg("--config")
+        .arg(&config)
+        .args(["--json", "Verbindlichkeit"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert!(output.stderr.is_empty());
+    let result: voci::domain::LookupResult = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result.query, "Verbindlichkeit");
+    assert_eq!(result.candidates[0].text, "liability");
+    assert_eq!(
+        result.attribution.as_deref(),
+        Some(voci::wikdict::ATTRIBUTION)
+    );
+    let output = support::command()
+        .arg("--config")
+        .arg(&config)
+        .args(["--json", "--from", "de", "absent"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("No entry found")
+    );
     for (query, expected) in [("STRASSE", "street"), ("GRÜSSE", "greetings")] {
         support::command()
             .arg("--config")
@@ -446,5 +478,70 @@ async fn concurrent_first_runs_install_complete_dictionaries() {
             .unwrap()
             .candidates
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn coordinator_retries_failed_preparation_and_reuses_success_across_submissions() {
+    use std::sync::Arc;
+    use voci::{config::Config, coordinator::Coordinator};
+    let root = tempfile::tempdir().unwrap();
+    installed(root.path());
+    let reverse = root.path().join(RELEASE).join("en-de.sqlite3");
+    std::fs::write(&reverse, b"broken dictionary").unwrap();
+    let mut config = Config::from_sources(None, None, None).unwrap();
+    config.wikdict_data_dir = Some(root.path().into());
+    let mut coordinator = Coordinator::new(None, None, Some(root.path().join("history.db")));
+    coordinator.config = Some(Arc::new(config));
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    let request = LookupRequest {
+        query: "Verbindlichkeit".into(),
+        from: Some(Language::German),
+        to: None,
+    };
+    // Construction remains lazy; failed initialization must be retried.
+    assert!(!root.path().join("history.db").exists());
+    assert!(matches!(
+        coordinator
+            .run(request.clone(), receiver.clone(), None)
+            .await
+            .result,
+        Err(LookupError::Dictionary(_))
+    ));
+    std::fs::remove_file(&reverse).unwrap();
+    fixture(&reverse, false);
+    assert!(
+        coordinator
+            .run(request.clone(), receiver.clone(), None)
+            .await
+            .result
+            .is_ok()
+    );
+    // If each submission prepared both dictionaries again, this would fail.
+    std::fs::write(&reverse, b"broken dictionary").unwrap();
+    assert!(
+        coordinator
+            .clone()
+            .run(request, receiver, None)
+            .await
+            .result
+            .is_ok()
+    );
+    let entries = coordinator
+        .history
+        .as_ref()
+        .unwrap()
+        .page(Default::default(), None, 20, false)
+        .await
+        .unwrap()
+        .entries;
+    assert_eq!(entries.len(), 3);
+    assert!(entries.iter().all(|entry| entry.finished.is_some()));
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.result().is_some())
+            .count(),
+        2
     );
 }

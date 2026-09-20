@@ -258,12 +258,12 @@ async fn coordinator_records_setup_failures_and_cancellation_but_not_invalid_inp
     let root = tempfile::tempdir().unwrap();
     let store = HistoryStore::new(root.path().join("voci.db"));
     let config = Config::from_sources(Some("provider='microsoft'"), None, None).unwrap();
-    let coordinator = Coordinator {
-        history: Ok(store.clone()),
-        config_path: None,
-        provider_override: Some(ProviderName::Microsoft),
-        config: Some(Arc::new(config)),
-    };
+    let mut coordinator = Coordinator::new(
+        None,
+        Some(ProviderName::Microsoft),
+        Some(store.path().into()),
+    );
+    coordinator.config = Some(Arc::new(config));
     let (_tx, rx) = tokio::sync::watch::channel(false);
     let bad = coordinator.run(request(""), rx.clone(), None).await;
     assert!(matches!(bad.result, Err(LookupError::InvalidInput(_))));
@@ -464,7 +464,8 @@ async fn cli_prints_all_candidates_and_searches_existing_events() {
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("12. value 11").and(predicate::str::contains("Attribution")),
+            predicate::str::contains("│ 12 │ value 11")
+                .and(predicate::str::contains("Source: Attribution")),
         );
     assert_eq!(
         store
@@ -609,12 +610,8 @@ async fn lookup_failure_and_cancellation_remain_visible_when_storage_is_unavaila
     let blocked = root.path().join("blocked");
     std::fs::write(&blocked, "not a directory").unwrap();
     let config = Config::from_sources(Some("provider='microsoft'"), None, None).unwrap();
-    let coordinator = Coordinator {
-        history: Ok(HistoryStore::new(blocked.join("voci.db"))),
-        config_path: None,
-        provider_override: None,
-        config: Some(Arc::new(config)),
-    };
+    let mut coordinator = Coordinator::new(None, None, Some(blocked.join("voci.db")));
+    coordinator.config = Some(Arc::new(config));
     let (_tx, rx) = tokio::sync::watch::channel(false);
     let completion = coordinator.run(request("word"), rx, None).await;
     assert!(matches!(
@@ -623,4 +620,299 @@ async fn lookup_failure_and_cancellation_remain_visible_when_storage_is_unavaila
     ));
     assert_eq!(completion.warnings.len(), 1);
     assert!(completion.warnings[0].contains("voci.db"));
+}
+
+#[tokio::test]
+async fn misses_preserve_resolved_pairs_and_legacy_outcomes_remain_readable() {
+    let root = tempfile::tempdir().unwrap();
+    let store = HistoryStore::new(root.path().join("voci.db"));
+    let request = LookupRequest {
+        query: "missing".into(),
+        from: Some(Language::German),
+        to: None,
+    };
+    let id = store.start(request, None).await.unwrap();
+    let outcome = Finished::from_result(&Err(LookupError::NotFound {
+        query: "missing".into(),
+        pair: INITIAL_PAIRS[0],
+    }));
+    let json = serde_json::to_string(&outcome).unwrap();
+    let restored: Finished = serde_json::from_str(&json).unwrap();
+    assert_eq!(restored.resolved_pair, Some(INITIAL_PAIRS[0]));
+    store.finish(id, restored, None).await.unwrap();
+    let page = store
+        .page(HistoryFilter::default(), None, 20, false)
+        .await
+        .unwrap();
+    assert_eq!(page.entries[0].from, Some(Language::German));
+    assert_eq!(page.entries[0].to, Some(Language::English));
+    assert!(page.entries[0].result().is_none());
+
+    let mut legacy = serde_json::to_value(Finished::from_result(&Ok(result("legacy")))).unwrap();
+    legacy.as_object_mut().unwrap().remove("resolved_pair");
+    let restored: Finished = serde_json::from_value(legacy).unwrap();
+    assert_eq!(restored.resolved_pair, None);
+    let id = store
+        .start(
+            LookupRequest {
+                query: "legacy".into(),
+                from: None,
+                to: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    store.finish(id, restored, None).await.unwrap();
+    let page = store
+        .page(HistoryFilter::default(), None, 20, false)
+        .await
+        .unwrap();
+    assert_eq!(page.entries[0].from, Some(Language::German));
+    assert_eq!(page.entries[0].to, Some(Language::English));
+    let legacy_failure: Finished = serde_json::from_str(
+        r#"{"outcome":"not_found","result":null,"error_code":"not_found","message":"missing"}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy_failure.resolved_pair, None);
+}
+
+#[tokio::test]
+async fn shell_settings_and_saved_history_do_not_require_valid_provider_settings() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("config.toml");
+    for invalid in ["provider='unavailable'", "target_language='fr'"] {
+        std::fs::write(
+            &path,
+            format!(
+                "{invalid}\n[history]\ndatabase='history.db'\n[tui]\nkeybindings='custom.toml'\n"
+            ),
+        )
+        .unwrap();
+        let settings = voci::config::TuiConfig::load(Some(&path)).unwrap();
+        assert_eq!(settings.keybindings, Some(PathBuf::from("custom.toml")));
+        let coordinator = Coordinator::new(Some(path.clone()), None, None);
+        let store = coordinator.history.as_ref().unwrap();
+        let id = store.start(request("saved encounter"), None).await.unwrap();
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let completion = coordinator.run(request("new lookup"), receiver, None).await;
+        assert!(matches!(
+            completion.result,
+            Err(LookupError::Configuration(_))
+        ));
+        let page = store
+            .page(HistoryFilter::default(), None, 20, false)
+            .await
+            .unwrap();
+        assert!(page.entries.iter().any(|entry| entry.id == id));
+        assert_eq!(
+            page.entries[0]
+                .finished
+                .as_ref()
+                .unwrap()
+                .error_code
+                .as_deref(),
+            Some("configuration")
+        );
+    }
+}
+
+#[tokio::test]
+async fn cli_json_history_preserves_results_statuses_and_pagination() {
+    let home = tempfile::tempdir().unwrap();
+    let store = HistoryStore::new(db_path(home.path()));
+    let id = store.start(request("Verbindlichkeit"), None).await.unwrap();
+    store
+        .finish(
+            id,
+            Finished::from_result(&Ok(result("Verbindlichkeit"))),
+            None,
+        )
+        .await
+        .unwrap();
+    let failed = store.start(request("failed"), None).await.unwrap();
+    store
+        .finish(
+            failed,
+            Finished::from_result(&Err(LookupError::Network)),
+            None,
+        )
+        .await
+        .unwrap();
+    let unfinished = store.start(request("unfinished"), None).await.unwrap();
+    for args in [vec!["--json", "history"], vec!["history", "--json"]] {
+        let mut command = support::command();
+        support::isolate(&mut command, home.path());
+        let output = command.args(args).assert().success().get_output().clone();
+        assert!(output.stderr.is_empty());
+        let page: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(page["has_more"], false);
+        assert_eq!(page["entries"].as_array().unwrap().len(), 3);
+        assert_eq!(page["entries"][0]["id"], unfinished);
+        assert!(page["entries"][0]["finished"].is_null());
+        assert_eq!(page["entries"][1]["finished"]["error_code"], "network");
+        let saved = &page["entries"][2]["finished"]["result"];
+        assert_eq!(saved["candidates"].as_array().unwrap().len(), 12);
+        assert_eq!(saved["candidates"][0]["text"], "Straße 100%_ e\u{301}");
+        assert_eq!(saved["attribution"], "Attribution");
+    }
+    for (args, count, more) in [
+        (vec!["history", "--json", "--limit", "1"], 1, true),
+        (vec!["search", "STRASSE", "--json"], 1, false),
+        (vec!["search", "absent", "--json"], 0, false),
+    ] {
+        let mut command = support::command();
+        support::isolate(&mut command, home.path());
+        let output = command.args(args).assert().success().get_output().clone();
+        let page: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(page["entries"].as_array().unwrap().len(), count);
+        assert_eq!(page["has_more"], more);
+    }
+    let output = support::command()
+        .args(["history", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let page: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(page, serde_json::json!({"entries": [], "has_more": false}));
+}
+
+#[test]
+fn history_tables_wrap_unicode_and_keep_outcomes_visible() {
+    use unicode_width::UnicodeWidthStr;
+    let mut lookup = result("request");
+    lookup.candidates[0].text = "界 👩‍💻 e\u{301} ".repeat(30);
+    lookup.candidates[0].sense = Some(format!("{}\x1b[31m", "longword".repeat(40)));
+    let mut entry = HistoryEntry {
+        id: "test".into(),
+        sequence: 1,
+        query: "request\x1b[31m".into(),
+        from: Some(Language::German),
+        to: Some(Language::English),
+        provider: Some("fixture".into()),
+        started_at: 0,
+        finished_at: Some(1),
+        finished: Some(Finished::from_result(&Ok(lookup))),
+    };
+    for width in [16, 32, 59, 60, 80, 100, 120] {
+        let rendered = voci::presentation::render_history_at_width(&entry, width);
+        assert!(
+            rendered.lines().all(|line| line.width() == width),
+            "width {width}"
+        );
+        assert!(!rendered.contains('\x1b'));
+        assert!(rendered.contains("👩‍💻"));
+        assert!(rendered.contains("e\u{301}"));
+        assert!(rendered.contains("Source:"));
+    }
+    entry.finished = Some(Finished::from_result(&Err(LookupError::Network)));
+    let rendered = voci::presentation::render_history(&entry);
+    assert!(rendered.contains("failed"));
+    assert!(rendered.contains("Cannot connect"));
+    entry.finished = None;
+    entry.finished_at = None;
+    assert!(
+        voci::presentation::render_history(&entry).contains("unfinished · outcome not recorded")
+    );
+}
+
+#[test]
+fn json_errors_keep_stdout_empty_and_exit_codes_intact() {
+    for args in [
+        vec!["--json", "shell"],
+        vec!["--json", "--from", "de", "--to", "de", "word"],
+    ] {
+        let output = support::command()
+            .args(args)
+            .assert()
+            .code(2)
+            .get_output()
+            .clone();
+        assert!(output.stdout.is_empty());
+        let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+        assert_eq!(error["error"]["code"], 2);
+        assert!(error["error"]["message"].as_str().is_some());
+    }
+    let output = support::command()
+        .args(["history", "--json", "--config", "missing.toml"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], 1);
+}
+
+#[tokio::test]
+async fn cli_history_defaults_to_twenty_and_all_keeps_filters() {
+    let home = tempfile::tempdir().unwrap();
+    let store = HistoryStore::new(db_path(home.path()));
+    for index in 0..25 {
+        store
+            .start(request(&format!("saved {index:02}")), None)
+            .await
+            .unwrap();
+    }
+    store.start(request("other"), None).await.unwrap();
+
+    for (args, count, more, first, last) in [
+        (vec!["history"], 20, true, "other", "saved 06"),
+        (vec!["history", "--all"], 26, false, "other", "saved 00"),
+        (
+            vec!["history", "--limit", "3"],
+            3,
+            true,
+            "other",
+            "saved 23",
+        ),
+        (vec!["search", "saved"], 20, true, "saved 24", "saved 05"),
+        (
+            vec!["search", "saved", "--all", "--today"],
+            25,
+            false,
+            "saved 24",
+            "saved 00",
+        ),
+    ] {
+        let mut command = support::command();
+        support::isolate(&mut command, home.path());
+        let output = command
+            .args(&args)
+            .arg("--json")
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        let page: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let entries = page["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), count);
+        assert_eq!(page["has_more"], more);
+        assert_eq!(entries.first().unwrap()["query"], first);
+        assert_eq!(entries.last().unwrap()["query"], last);
+
+        let mut command = support::command();
+        support::isolate(&mut command, home.path());
+        let output = command.args(&args).assert().success().get_output().clone();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(text.matches("Request:").count(), count);
+    }
+
+    for args in [
+        vec!["history", "--all", "--limit", "10"],
+        vec!["search", "saved", "--limit", "20", "--all"],
+    ] {
+        support::command().args(args).assert().code(2);
+    }
+    let output = support::command()
+        .args(["history", "--all", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        serde_json::json!({"entries": [], "has_more": false})
+    );
 }

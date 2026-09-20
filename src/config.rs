@@ -74,8 +74,28 @@ fn checked_database_path(path: PathBuf) -> Result<PathBuf, LookupError> {
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct TuiConfig {
-    keybindings: Option<PathBuf>,
+pub struct TuiConfig {
+    pub keybindings: Option<PathBuf>,
+}
+
+impl TuiConfig {
+    /// Shell startup must not depend on valid lookup-provider settings.
+    pub fn load(explicit: Option<&Path>) -> Result<Self, LookupError> {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct TuiOnly {
+            tui: TuiConfig,
+        }
+        let settings: TuiOnly = match read_config(explicit)? {
+            Some(content) => toml::from_str(&content).map_err(|_| {
+                LookupError::Configuration(
+                    "Cannot read TUI settings from config.toml. Expected [tui].keybindings as a path.".into(),
+                )
+            })?,
+            None => TuiOnly::default(),
+        };
+        Ok(settings.tui)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, ValueEnum)]
@@ -126,6 +146,23 @@ pub fn default_path() -> Result<PathBuf, LookupError> {
         })
 }
 
+fn read_config(explicit: Option<&Path>) -> Result<Option<String>, LookupError> {
+    let path = explicit
+        .map(Path::to_owned)
+        .map(Ok)
+        .unwrap_or_else(default_path)?;
+    match fs::read_to_string(&path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && explicit.is_none() => {
+            Ok(None)
+        }
+        Err(_) => Err(LookupError::Configuration(format!(
+            "Cannot read {}. Check the path and file permissions.",
+            path.display()
+        ))),
+    }
+}
+
 impl Config {
     pub fn wikdict_dir(&self) -> Result<PathBuf, LookupError> {
         if let Some(path) = &self.wikdict_data_dir {
@@ -154,22 +191,7 @@ impl Config {
         crate::provider::MicrosoftProvider::new(key, self.region.as_deref())
     }
     pub fn load(explicit: Option<&Path>) -> Result<Self, LookupError> {
-        let path = match explicit {
-            Some(path) => path.to_owned(),
-            None => default_path()?,
-        };
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => Some(content),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && explicit.is_none() => {
-                None
-            }
-            Err(_) => {
-                return Err(LookupError::Configuration(format!(
-                    "Cannot read {}. Check the path and file permissions.",
-                    path.display()
-                )));
-            }
-        };
+        let content = read_config(explicit)?;
         Self::from_sources(
             content.as_deref(),
             env::var("VOCI_MICROSOFT_KEY").ok(),

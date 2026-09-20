@@ -1,12 +1,12 @@
 use clap::{CommandFactory, Parser};
 use std::{
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     process::ExitCode,
     sync::Arc,
 };
 use voci::{
     cli::{Cli, Command},
-    config::Config,
+    config::TuiConfig,
     coordinator::Coordinator,
     history::{HistoryFilter, HistoryStore},
     keybindings::Keybindings,
@@ -35,6 +35,17 @@ async fn main() -> ExitCode {
             return ExitCode::from(code);
         }
     };
+    let fail = |code, message: &str| {
+        if cli.json {
+            eprintln!(
+                "{}",
+                serde_json::json!({"error": {"code": code, "message": safe_text(message)}})
+            );
+            ExitCode::from(code)
+        } else {
+            fail(code, message)
+        }
+    };
     if cli.word.is_none() && cli.command.is_none() {
         let _ = Cli::command().print_help();
         println!();
@@ -56,14 +67,27 @@ async fn main() -> ExitCode {
                 _ => String::new(),
             },
         };
-        return match store.page(filter, None, options.limit, false).await {
+        let limit = if options.all {
+            usize::MAX
+        } else {
+            options.limit
+        };
+        return match store.page(filter, None, limit, false).await {
             Ok(page) => {
+                if cli.json {
+                    return output_json(&page);
+                }
+                let width = if io::stdout().is_terminal() {
+                    crossterm::terminal::size().map_or(100, |(width, _)| usize::from(width))
+                } else {
+                    100
+                };
                 let text = if page.entries.is_empty() {
                     "No saved lookups match.\n".to_owned()
                 } else {
                     page.entries
                         .iter()
-                        .map(voci::presentation::render_history)
+                        .map(|entry| voci::presentation::render_history_at_width(entry, width))
                         .collect::<Vec<_>>()
                         .join("\n")
                 };
@@ -75,7 +99,7 @@ async fn main() -> ExitCode {
     if let Err(e) = cli.validate() {
         return fail(e.exit_code(), &e.to_string());
     }
-    let mut coordinator = Coordinator::new(cli.config.clone(), cli.provider, cli.database.clone());
+    let coordinator = Coordinator::new(cli.config.clone(), cli.provider, cli.database.clone());
     if let Some(request) = cli.request() {
         let (cancel, receiver) = tokio::sync::watch::channel(false);
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -92,6 +116,7 @@ async fn main() -> ExitCode {
             eprintln!("{}", safe_text(&warning));
         }
         match completion.result {
+            Ok(result) if cli.json => output_json(&result),
             Ok(result) => output(&render_result(&result)),
             Err(e) => fail(e.exit_code(), &e.to_string()),
         }
@@ -99,7 +124,7 @@ async fn main() -> ExitCode {
         if let Err(e) = tui::check_terminal() {
             return fail(1, &e.to_string());
         }
-        let config = match Config::load(cli.config.as_deref()) {
+        let config = match TuiConfig::load(cli.config.as_deref()) {
             Ok(config) => config,
             Err(e) => return fail(e.exit_code(), &e.to_string()),
         };
@@ -117,11 +142,16 @@ async fn main() -> ExitCode {
                 Ok(v) => v,
                 Err(e) => return fail(1, &e),
             };
-        coordinator.config = Some(Arc::new(config));
         match tui::run(Arc::new(coordinator), cli.from, cli.to, bindings, warnings).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(1, &e.to_string()),
         }
+    }
+}
+fn output_json(value: &impl serde::Serialize) -> ExitCode {
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => output(&format!("{json}\n")),
+        Err(_) => fail(1, "Cannot serialize results as JSON."),
     }
 }
 fn output(text: &str) -> ExitCode {

@@ -7,7 +7,12 @@ use crate::{
     wikdict::WikDictProvider,
 };
 use std::{path::PathBuf, sync::Arc};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{OnceCell, mpsc, watch};
+
+struct Prepared {
+    config: Arc<Config>,
+    service: LookupService<Provider>,
+}
 
 pub struct Completion {
     pub result: Result<LookupResult, LookupError>,
@@ -19,6 +24,7 @@ pub struct Coordinator {
     pub config_path: Option<PathBuf>,
     pub provider_override: Option<ProviderName>,
     pub config: Option<Arc<Config>>,
+    prepared: Arc<OnceCell<Prepared>>,
 }
 impl Coordinator {
     pub fn new(
@@ -34,6 +40,7 @@ impl Coordinator {
             config_path,
             provider_override,
             config: None,
+            prepared: Arc::new(OnceCell::new()),
         }
     }
     pub async fn run(
@@ -59,6 +66,7 @@ impl Coordinator {
         let initial_provider = self
             .provider_override
             .or_else(|| self.config.as_ref().map(|c| c.provider))
+            .or_else(|| self.prepared.get().map(|p| p.config.provider))
             .map(provider_name);
         let attempt = match &self.history {
             Ok(store) => match store.start(request.clone(), initial_provider).await {
@@ -74,8 +82,10 @@ impl Coordinator {
             }
         };
         let config = self
-            .config
-            .clone()
+            .prepared
+            .get()
+            .map(|p| Arc::clone(&p.config))
+            .or_else(|| self.config.clone())
             .map(Ok)
             .unwrap_or_else(|| Config::load(self.config_path.as_deref()).map(Arc::new));
         let selected = config
@@ -84,23 +94,32 @@ impl Coordinator {
             .map(|c| self.provider_override.unwrap_or(c.provider));
         let operation = async {
             let config = config?;
-            let provider = match selected.unwrap() {
-                ProviderName::Wikdict => {
-                    let provider = WikDictProvider::new(config.wikdict_dir()?);
-                    provider
-                        .prepare(|message| {
-                            if let Some(tx) = &progress {
-                                let _ = tx.send(message.to_owned());
-                            }
-                        })
-                        .await?;
-                    Provider::WikDict(provider)
-                }
-                ProviderName::Microsoft => Provider::Microsoft(config.microsoft()?),
-            };
-            LookupService::new(provider, config.target_language)
-                .lookup(request)
-                .await
+            // Share successful preparation across submissions and coordinator clones.
+            // Failed or cancelled initialization leaves the cell empty for retry.
+            let prepared = self
+                .prepared
+                .get_or_try_init(|| async {
+                    let provider = match selected.unwrap() {
+                        ProviderName::Wikdict => {
+                            let provider = WikDictProvider::new(config.wikdict_dir()?);
+                            provider
+                                .prepare(|message| {
+                                    if let Some(tx) = &progress {
+                                        let _ = tx.send(message.to_owned());
+                                    }
+                                })
+                                .await?;
+                            Provider::WikDict(provider)
+                        }
+                        ProviderName::Microsoft => Provider::Microsoft(config.microsoft()?),
+                    };
+                    Ok::<_, LookupError>(Prepared {
+                        service: LookupService::new(provider, config.target_language),
+                        config,
+                    })
+                })
+                .await?;
+            prepared.service.lookup(request).await
         };
         let result = tokio::select! {
             biased;

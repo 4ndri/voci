@@ -1,5 +1,5 @@
 //! Immutable lookup events. Reads join start/outcome events into one encounter.
-use crate::domain::{Language, LookupError, LookupRequest, LookupResult};
+use crate::domain::{Language, LanguagePair, LookupError, LookupRequest, LookupResult};
 use caseless::Caseless;
 use chrono::{DateTime, Days, Local, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags, functions::FunctionFlags, params};
@@ -27,6 +27,9 @@ pub enum AttemptOutcome {
 pub struct Finished {
     pub outcome: AttemptOutcome,
     pub result: Option<LookupResult>,
+    // Optional for compatibility with previously stored outcome events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_pair: Option<LanguagePair>,
     pub error_code: Option<String>,
     pub message: Option<String>,
 }
@@ -36,6 +39,7 @@ impl Finished {
             Ok(result) => Self {
                 outcome: AttemptOutcome::Success,
                 result: Some(result.clone()),
+                resolved_pair: Some(result.pair),
                 error_code: None,
                 message: None,
             },
@@ -64,6 +68,10 @@ impl Finished {
                 Self {
                     outcome,
                     result: None,
+                    resolved_pair: match error {
+                        LookupError::NotFound { pair, .. } => Some(*pair),
+                        _ => None,
+                    },
                     error_code: Some(code.into()),
                     message: Some(crate::presentation::safe_text(&error.to_string())),
                 }
@@ -82,7 +90,7 @@ impl Finished {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct HistoryEntry {
     pub id: AttemptId,
     pub sequence: i64,
@@ -121,7 +129,7 @@ pub struct HistoryFilter {
     pub text: String,
     pub today: bool,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct HistoryPage {
     pub entries: Vec<HistoryEntry>,
     pub has_more: bool,
@@ -287,7 +295,7 @@ impl HistoryStore {
     ) -> Result<(), HistoryError> {
         self.worker(move |store| {
             let connection = store.open(true)?.unwrap();
-            let pair = outcome.result.as_ref().map(|r|r.pair);
+            let pair = outcome.resolved_pair.or_else(|| outcome.result.as_ref().map(|r|r.pair));
             let provider = outcome.result.as_ref().map(|r|r.provider.clone()).or(provider);
             let json = serde_json::to_string(&outcome).map_err(|e| store.error(e))?;
             let count = connection.execute("INSERT INTO events(attempt_id,phase,timestamp,query,source_language,target_language,provider,data_json)

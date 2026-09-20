@@ -30,6 +30,9 @@ pub struct Cli {
     /// Dictionary source (default: wikdict, or the configured provider)
     #[arg(long, global = true, value_enum)]
     pub provider: Option<ProviderName>,
+    /// Emit JSON for lookup, history, and search (diagnostics go to stderr)
+    #[arg(long, global = true)]
+    pub json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -51,8 +54,12 @@ pub enum Command {
 pub struct HistoryArgs {
     #[arg(long)]
     pub today: bool,
+    /// Maximum number of matching entries, newest first
     #[arg(long, default_value="20", value_parser=positive)]
     pub limit: usize,
+    /// Show all matching entries instead of the latest 20
+    #[arg(long, conflicts_with = "limit")]
+    pub all: bool,
 }
 fn positive(value: &str) -> Result<usize, String> {
     value
@@ -71,6 +78,11 @@ fn nonempty(value: &str) -> Result<String, String> {
 
 impl Cli {
     pub fn validate(&self) -> Result<(), LookupError> {
+        if self.json && matches!(self.command, Some(Command::Shell)) {
+            return Err(LookupError::InvalidInput(
+                "--json is available for lookup, history, and search; shell is interactive.".into(),
+            ));
+        }
         if self.word.is_some() && self.command.is_some() {
             return Err(LookupError::InvalidInput(
                 "A lookup word cannot be combined with a subcommand.".into(),

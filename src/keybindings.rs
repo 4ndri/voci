@@ -48,6 +48,8 @@ pub enum Context {
     Input = 4,
     Visual = 8,
     Pane = 16,
+    Insert = 32,
+    Dialog = 64,
 }
 impl Action {
     fn contexts(self) -> u8 {
@@ -73,6 +75,12 @@ struct Key {
     modifiers: KeyModifiers,
 }
 impl Key {
+    fn command(self) -> bool {
+        !matches!(self.code, KeyCode::Char(_))
+            || self
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    }
     fn event(event: KeyEvent) -> Self {
         let mut modifiers = event.modifiers;
         if matches!(event.code, KeyCode::Char(_)) {
@@ -173,11 +181,37 @@ impl Keybindings {
                 }) {
                     return Err("Ctrl-c is reserved for emergency exit.".into());
                 }
+                let mut contexts = action.contexts();
+                if matches!(
+                    action,
+                    Action::Submit
+                        | Action::NextFocus
+                        | Action::PreviousFocus
+                        | Action::Pane
+                        | Action::Cancel
+                        | Action::WordBegin
+                        | Action::WordEnd
+                ) && keys.first().is_some_and(|key| key.command())
+                {
+                    contexts |= Context::Insert as u8;
+                }
+                if matches!(
+                    action,
+                    Action::Submit
+                        | Action::NextFocus
+                        | Action::PreviousFocus
+                        | Action::Pane
+                        | Action::Cancel
+                        | Action::Left
+                        | Action::Right
+                ) {
+                    contexts |= Context::Dialog as u8;
+                }
                 bindings.push(Binding {
                     action,
                     keys,
                     label,
-                    contexts: action.contexts(),
+                    contexts,
                 });
             }
         }
@@ -278,23 +312,6 @@ impl Keybindings {
             .map(|b| b.label.as_str())
             .collect::<Vec<_>>()
             .join("/")
-    }
-    pub fn direct(&self, key: KeyEvent, action: Action) -> bool {
-        let key = Key::event(key);
-        self.bindings
-            .iter()
-            .any(|b| b.action == action && b.keys == [key])
-    }
-    pub fn insert_motion(&self, key: KeyEvent) -> Option<Action> {
-        if !key
-            .modifiers
-            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-        {
-            return None;
-        }
-        [Action::WordBegin, Action::WordEnd]
-            .into_iter()
-            .find(|action| self.direct(key, *action))
     }
 }
 fn parse_sequence(value: &str) -> Result<Vec<Key>, String> {
@@ -463,6 +480,49 @@ mod tests {
         assert!(Keybindings::parse("[navigation]\nleft=[]").is_err());
     }
     #[test]
+    fn insert_sequences_timeout_and_do_not_start_with_ordinary_letters() {
+        let bindings = Keybindings::parse("[actions]\nsubmit=['Ctrl-x s','zz']").unwrap();
+        let mut resolver = Resolver::default();
+        let now = Instant::now();
+        let prefix = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert_eq!(
+            resolver.feed(&bindings, key('z'), Context::Insert, now),
+            None
+        );
+        assert!(!resolver.pending());
+        assert_eq!(resolver.feed(&bindings, prefix, Context::Insert, now), None);
+        assert_eq!(
+            resolver.feed(&bindings, key('s'), Context::Insert, now),
+            Some(Action::Submit)
+        );
+        resolver.feed(&bindings, prefix, Context::Insert, now);
+        assert_eq!(
+            resolver.feed(
+                &bindings,
+                key('s'),
+                Context::Insert,
+                now + Duration::from_secs(1)
+            ),
+            None
+        );
+        assert!(!resolver.pending());
+        resolver.feed(
+            &bindings,
+            prefix,
+            Context::Insert,
+            now + Duration::from_secs(2),
+        );
+        assert_eq!(
+            resolver.feed(
+                &bindings,
+                key('s'),
+                Context::Dialog,
+                now + Duration::from_secs(2)
+            ),
+            None
+        );
+    }
+    #[test]
     fn presets_preserve_edits_and_resolve_relative_to_config() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.toml");
@@ -507,9 +567,17 @@ mod tests {
         let remapped =
             Keybindings::parse("[actions]\nword_begin=['Alt-b']\nword_end=['Alt-f']").unwrap();
         assert_eq!(
-            remapped.insert_motion(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)),
+            resolver.feed(
+                &remapped,
+                KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT),
+                Context::Insert,
+                now
+            ),
             Some(Action::WordEnd)
         );
-        assert_eq!(remapped.insert_motion(key('b')), None);
+        assert_eq!(
+            resolver.feed(&remapped, key('b'), Context::Insert, now),
+            None
+        );
     }
 }
