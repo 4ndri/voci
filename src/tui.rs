@@ -12,8 +12,9 @@ use crate::{
 use crossterm::{
     cursor::SetCursorStyle,
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
-        KeyEventKind, KeyModifiers,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+        MouseEventKind,
     },
     execute,
 };
@@ -46,6 +47,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,
+            DisableMouseCapture,
             SetCursorStyle::DefaultUserShape
         );
         ratatui::restore();
@@ -57,6 +59,20 @@ enum Tab {
     Lookup,
     History,
 }
+impl Tab {
+    fn panes(self) -> &'static [Focus] {
+        match self {
+            Self::Lookup => &[
+                Focus::Input,
+                Focus::Source,
+                Focus::Target,
+                Focus::Details,
+                Focus::Recent,
+            ],
+            Self::History => &[Focus::History, Focus::Details],
+        }
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Focus {
     Input,
@@ -65,6 +81,11 @@ enum Focus {
     Details,
     Recent,
     History,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FocusTarget {
+    Pane(Focus),
+    Dialog(usize),
 }
 struct Dialog {
     text: Input,
@@ -130,6 +151,8 @@ struct App {
     notice: String,
     bindings: Keybindings,
     resolver: Resolver,
+    // Recorded in paint order each frame, so overlays win mouse hit testing.
+    focus_regions: Vec<(Rect, FocusTarget)>,
 }
 impl App {
     fn new(from: Option<Language>, to: Option<Language>, bindings: Keybindings) -> Self {
@@ -166,6 +189,7 @@ impl App {
             notice: String::new(),
             bindings,
             resolver: Resolver::default(),
+            focus_regions: vec![],
         }
     }
     fn selected(&self) -> Option<&HistoryEntry> {
@@ -397,6 +421,36 @@ impl App {
         Effect::None
     }
     fn event(&mut self, event: Event) -> Effect {
+        if let Event::Mouse(mouse) = event {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && let Some((_, target)) = self
+                    .focus_regions
+                    .iter()
+                    .rev()
+                    .find(|(area, _)| area.contains((mouse.column, mouse.row).into()))
+            {
+                let target = *target;
+                match target {
+                    FocusTarget::Pane(focus) if self.dialog.is_none() => {
+                        if self.focus != focus {
+                            self.set_focus(focus);
+                        }
+                    }
+                    FocusTarget::Dialog(field) => {
+                        if let Some(dialog) = &mut self.dialog
+                            && dialog.field != field
+                        {
+                            dialog.text.mode(InputMode::Normal);
+                            dialog.field = field;
+                        }
+                    }
+                    _ => return Effect::None,
+                }
+                self.pane_mode = false;
+                self.resolver.reset();
+            }
+            return Effect::None;
+        }
         if let Event::Paste(text) = event {
             if !self.pane_mode
                 && let Some(input) = self.focused_input_mut()
@@ -432,6 +486,8 @@ impl App {
             {
                 if action == Action::Pane {
                     self.toggle_panes();
+                } else if let Action::FocusPane(number) = action {
+                    self.focus_pane(number);
                 } else if action == Action::Cancel {
                     return self.escape();
                 } else if matches!(
@@ -503,6 +559,10 @@ impl App {
             return effect;
         }
         match action {
+            Action::FocusPane(number) => {
+                self.focus_pane(number);
+                Effect::None
+            }
             Action::Pane => {
                 self.toggle_panes();
                 Effect::None
@@ -669,19 +729,21 @@ impl App {
         }
     }
     fn move_focus(&mut self, delta: isize) {
-        let order: &[Focus] = if self.tab == Tab::History {
-            &[Focus::History, Focus::Details]
-        } else {
-            &[
-                Focus::Input,
-                Focus::Source,
-                Focus::Target,
-                Focus::Details,
-                Focus::Recent,
-            ]
-        };
+        let order = self.tab.panes();
         let i = order.iter().position(|f| *f == self.focus).unwrap_or(0);
         self.set_focus(order[(i as isize + delta).rem_euclid(order.len() as isize) as usize]);
+    }
+    fn focus_pane(&mut self, number: u8) {
+        if !(1..=5).contains(&number) {
+            return;
+        }
+        if let Some(dialog) = &mut self.dialog {
+            dialog.text.mode(InputMode::Normal);
+            dialog.field = usize::from(number - 1);
+            self.resolver.reset();
+        } else if let Some(&focus) = self.tab.panes().get(usize::from(number - 1)) {
+            self.set_focus(focus);
+        }
     }
     fn set_focus(&mut self, focus: Focus) {
         self.focus = focus;
@@ -922,6 +984,7 @@ impl App {
         }
         match action {
             Action::Pane => self.toggle_panes(),
+            Action::FocusPane(number) => self.focus_pane(number),
             Action::Cancel => return self.escape(),
             Action::WordBegin | Action::WordEnd => {
                 return self.focused_input_mut().unwrap().action(action).into();
@@ -957,7 +1020,11 @@ impl App {
         if d.field == 0
             && !matches!(
                 action,
-                Action::Pane | Action::Cancel | Action::NextFocus | Action::PreviousFocus
+                Action::Pane
+                    | Action::FocusPane(_)
+                    | Action::Cancel
+                    | Action::NextFocus
+                    | Action::PreviousFocus
             )
         {
             return self.dialog.as_mut().unwrap().text.action(action).into();
@@ -968,6 +1035,7 @@ impl App {
         let d = self.dialog.as_mut().unwrap();
         match action {
             Action::Pane => self.toggle_panes(),
+            Action::FocusPane(number) => self.focus_pane(number),
             Action::Cancel => return self.escape(),
             Action::NextFocus | Action::PreviousFocus => {
                 d.text.mode(InputMode::Normal);
@@ -1006,10 +1074,25 @@ impl App {
         Effect::None
     }
     fn block(&self, title: &str, focus: Focus) -> Block<'static> {
-        bordered(title, self.focus == focus)
+        let number = self
+            .tab
+            .panes()
+            .iter()
+            .position(|pane| *pane == focus)
+            .unwrap() as u8
+            + 1;
+        bordered(
+            &format!(
+                " [{}] {} ",
+                self.bindings.label(Action::FocusPane(number)),
+                title.trim()
+            ),
+            self.focus == focus,
+        )
     }
 
     fn draw(&mut self, frame: &mut Frame) {
+        self.focus_regions.clear();
         let area = frame.area();
         if area.width < 24 || area.height < 12 {
             frame.render_widget(
@@ -1046,7 +1129,7 @@ impl App {
         };
         let help = if self.pane_mode {
             format!(
-                "PANE · {} left / {} right · {} up / {} down\nEnter, Esc or {} finishes pane selection\n{}",
+                "PANE · {} left / {} right · {} up / {} down\nTitle shortcuts focus · Enter, Esc or {} finishes\n{}",
                 self.bindings.label(Action::Left),
                 self.bindings.label(Action::Right),
                 self.bindings.label(Action::Up),
@@ -1154,6 +1237,11 @@ impl App {
         );
         let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(rows[1]);
+        self.focus_regions.extend([
+            (rows[0], FocusTarget::Pane(Focus::Input)),
+            (cols[0], FocusTarget::Pane(Focus::Source)),
+            (cols[1], FocusTarget::Pane(Focus::Target)),
+        ]);
         frame.render_widget(
             Paragraph::new(self.source.map_or("Auto", Language::code))
                 .block(self.block(" Source ", Focus::Source)),
@@ -1166,6 +1254,8 @@ impl App {
         );
         self.draw_details(frame, rows[2]);
         if recent_height > 0 {
+            self.focus_regions
+                .push((rows[3], FocusTarget::Pane(Focus::Recent)));
             let items = self
                 .recent
                 .iter()
@@ -1207,6 +1297,8 @@ impl App {
                 rows[0].width,
                 (self.suggestions.len() as u16 + 2).min(area.height.saturating_sub(3)),
             );
+            self.focus_regions
+                .push((popup, FocusTarget::Pane(Focus::Input)));
             let items = self
                 .suggestions
                 .iter()
@@ -1264,6 +1356,8 @@ impl App {
         };
         let single = area.width < 100 && area.height < 20;
         if !single || self.focus == Focus::History {
+            self.focus_regions
+                .push((panes[0], FocusTarget::Pane(Focus::History)));
             let block = self.block(" Encounters · newest first ", Focus::History);
             if self.entries.is_empty() {
                 let text = self.history_error.clone().unwrap_or_else(|| {
@@ -1320,6 +1414,8 @@ impl App {
         }
     }
     fn draw_details(&mut self, frame: &mut Frame, area: Rect) {
+        self.focus_regions
+            .push((area, FocusTarget::Pane(Focus::Details)));
         let entry = self.selected().cloned();
         let result = self.result().cloned();
         let title = if entry.is_some() {
@@ -1440,6 +1536,8 @@ impl App {
         );
     }
     fn draw_dialog(&mut self, frame: &mut Frame, area: Rect) {
+        // A modal dialog owns all focus; clicks outside its controls do nothing.
+        self.focus_regions.clear();
         let width = area.width.min(68);
         let height = area.height.min(14);
         let rect = Rect::new(
@@ -1462,7 +1560,20 @@ impl App {
         ])
         .split(inner);
         let d = self.dialog.as_ref().unwrap();
-        let field_block = |title: &str, field| bordered(title, d.field == field);
+        let field_block = |title: &str, field| {
+            bordered(
+                &format!(
+                    " [{}] {}",
+                    self.bindings.label(Action::FocusPane(field as u8 + 1)),
+                    title.trim()
+                ),
+                d.field == field,
+            )
+        };
+        self.focus_regions.extend([
+            (rows[0], FocusTarget::Dialog(0)),
+            (rows[1], FocusTarget::Dialog(1)),
+        ]);
         let block = field_block(" Text ", 0);
         draw_input(
             frame,
@@ -1481,6 +1592,8 @@ impl App {
             Layout::horizontal([Constraint::Min(7), Constraint::Min(7), Constraint::Min(8)])
                 .split(rows[2]);
         for (index, label) in ["Apply", "Clear", "Cancel"].into_iter().enumerate() {
+            self.focus_regions
+                .push((buttons[index], FocusTarget::Dialog(index + 2)));
             frame.render_widget(
                 Paragraph::new(label)
                     .centered()
@@ -1608,11 +1721,12 @@ pub async fn run(
         let _ = execute!(
             io::stdout(),
             DisableBracketedPaste,
+            DisableMouseCapture,
             SetCursorStyle::DefaultUserShape
         );
         previous_hook(info);
     }));
-    execute!(io::stdout(), EnableBracketedPaste)?;
+    execute!(io::stdout(), EnableBracketedPaste, EnableMouseCapture)?;
     let mut app = App::new(from, to, bindings);
     app.notice = warnings.join(" · ");
     let mut clipboard = DesktopClipboard::default();
@@ -2723,6 +2837,181 @@ mod tests {
     }
     fn ctrl(c: char) -> Event {
         Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+    fn click(column: u16, row: u16) -> Event {
+        mouse(MouseEventKind::Down(MouseButton::Left), column, row)
+    }
+    #[test]
+    fn numbered_panes_follow_titles_and_preserve_insert_text() {
+        for profile in [
+            include_str!("../assets/keybindings/qwerty.keybinding.toml"),
+            include_str!("../assets/keybindings/neo-noted.keybinding.toml"),
+        ] {
+            let mut app = App::new(None, None, Keybindings::parse(profile).unwrap());
+            for digit in "12345".chars() {
+                app.event(key(digit));
+            }
+            assert_eq!(app.input.text(), "12345");
+            assert_eq!(app.focus, Focus::Input);
+            app.input.mode(InputMode::Normal);
+            for pane_mode in [false, true] {
+                app.pane_mode = pane_mode;
+                for (digit, focus, title) in [
+                    ('5', Focus::Recent, "[5] Recent lookups"),
+                    ('4', Focus::Details, "[4] Lookup"),
+                    ('3', Focus::Target, "[3] Target"),
+                    ('2', Focus::Source, "[2] Source"),
+                    ('1', Focus::Input, "[1] Word"),
+                ] {
+                    assert!(screen(&mut app, 120, 32).contains(title));
+                    assert!(matches!(app.event(key(digit)), Effect::None));
+                    assert_eq!(app.focus, focus);
+                    assert_eq!(app.pane_mode, pane_mode);
+                }
+            }
+            app.pane_mode = false;
+            app.event(key('g'));
+            app.event(key('t'));
+            assert_eq!(app.tab, Tab::History);
+            let rendered = screen(&mut app, 120, 32);
+            assert!(rendered.contains("[1] Encounters"));
+            assert!(rendered.contains("[2] Lookup"));
+            app.event(key('2'));
+            assert_eq!(app.focus, Focus::Details);
+            app.event(key('5'));
+            assert_eq!(app.focus, Focus::Details);
+            app.event(key('1'));
+            assert_eq!(app.focus, Focus::History);
+        }
+    }
+    #[test]
+    fn pane_shortcut_remaps_update_titles_and_support_insert_commands() {
+        let bindings = Keybindings::parse("[actions]\nfocus_pane_3=['Alt-3']").unwrap();
+        let mut app = App::new(None, None, bindings);
+        assert!(screen(&mut app, 120, 32).contains("[Alt-3] Target"));
+        app.event(Event::Key(KeyEvent::new(
+            KeyCode::Char('3'),
+            KeyModifiers::ALT,
+        )));
+        assert_eq!(app.focus, Focus::Target);
+        assert!(app.input.text().is_empty());
+        app.event(key('1'));
+        app.event(key('3'));
+        assert_eq!(app.focus, Focus::Input);
+        assert!(Keybindings::parse("[actions]\nfocus_pane_3=['2']").is_err());
+    }
+    #[test]
+    fn clicks_focus_lookup_borders_and_contents_without_editing() {
+        let mut app = App::new(None, None, Keybindings::default());
+        app.input.insert("draft");
+        app.recent = vec![saved_entry(1)];
+        screen(&mut app, 120, 32);
+        app.event(click(3, 2));
+        assert!(app.input.get_mode() == InputMode::Insert);
+        for (x, y, focus) in [
+            (60, 4, Focus::Target),
+            (1, 5, Focus::Source),
+            (0, 7, Focus::Details),
+            (2, 23, Focus::Recent),
+            (0, 1, Focus::Input),
+        ] {
+            app.event(ctrl('w'));
+            app.event(click(x, y));
+            assert_eq!(app.focus, focus);
+            assert!(!app.pane_mode);
+            assert_eq!(app.input.text(), "draft");
+        }
+        assert!(app.preview.is_some());
+        for event in [
+            click(0, 0),
+            click(2, 31),
+            mouse(MouseEventKind::Down(MouseButton::Right), 60, 4),
+            mouse(MouseEventKind::Up(MouseButton::Left), 60, 4),
+            mouse(MouseEventKind::Drag(MouseButton::Left), 60, 4),
+            mouse(MouseEventKind::ScrollDown, 60, 4),
+        ] {
+            app.event(event);
+            assert_eq!(app.focus, Focus::Input);
+        }
+        app.input.mode(InputMode::Normal);
+        app.event(key('d'));
+        assert!(app.resolver.pending());
+        app.event(click(0, 1));
+        assert!(!app.resolver.pending());
+        screen(&mut app, 8, 3);
+        app.event(click(60, 4));
+        assert_eq!(app.focus, Focus::Input);
+    }
+    #[test]
+    fn clicks_follow_history_layout_after_resize() {
+        let mut app = App::new(None, None, Keybindings::default());
+        app.tab = Tab::History;
+        app.focus = Focus::History;
+        for (width, height, details_x, details_y) in [(120, 32, 60, 3), (80, 32, 0, 20)] {
+            screen(&mut app, width, height);
+            app.event(click(details_x, details_y));
+            assert_eq!(app.focus, Focus::Details);
+            app.event(click(0, 3));
+            assert_eq!(app.focus, Focus::History);
+        }
+        for digit in ['2', '1'] {
+            app.event(key(digit));
+            let focus = app.focus;
+            screen(&mut app, 40, 18);
+            app.event(click(20, 10));
+            assert_eq!(app.focus, focus);
+        }
+    }
+    #[test]
+    fn overlays_own_mouse_and_numbered_focus() {
+        let mut app = App::new(None, None, Keybindings::default());
+        app.suggestions = vec![saved_entry(1)];
+        screen(&mut app, 120, 32);
+        app.event(click(60, 4));
+        assert_eq!(app.focus, Focus::Input);
+        assert!(app.input.get_mode() == InputMode::Insert);
+
+        app.tab = Tab::History;
+        app.focus = Focus::History;
+        app.event(key('/'));
+        app.event(key('2'));
+        assert_eq!(app.dialog.as_ref().unwrap().text.text(), "2");
+        screen(&mut app, 120, 32);
+        app.event(click(0, 3));
+        assert_eq!(app.dialog.as_ref().unwrap().field, 0);
+        app.event(click(60, 3));
+        assert_eq!(app.focus, Focus::History);
+        // Centered dialog: text at y=10, date at y=13, buttons at y=16.
+        for (x, y, field) in [
+            (27, 13, 1),
+            (27, 16, 2),
+            (49, 16, 3),
+            (71, 16, 4),
+            (27, 10, 0),
+        ] {
+            assert!(matches!(app.event(click(x, y)), Effect::None));
+            assert_eq!(app.dialog.as_ref().unwrap().field, field);
+            assert_eq!(app.dialog.as_ref().unwrap().text.text(), "2");
+        }
+        for pane_mode in [false, true] {
+            app.pane_mode = pane_mode;
+            for digit in ['5', '4', '3', '2', '1'] {
+                assert!(matches!(app.event(key(digit)), Effect::None));
+                assert_eq!(
+                    app.dialog.as_ref().unwrap().field,
+                    (digit as u8 - b'1') as usize
+                );
+                assert_eq!(app.pane_mode, pane_mode);
+            }
+        }
     }
     fn screen(app: &mut App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();

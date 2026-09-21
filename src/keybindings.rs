@@ -19,6 +19,7 @@ pub enum Action {
     NextTab,
     PreviousTab,
     Pane,
+    FocusPane(u8),
     Edit,
     Append,
     Undo,
@@ -56,6 +57,7 @@ pub enum Context {
 impl Action {
     fn contexts(self) -> u8 {
         match self {
+            Self::FocusPane(_) => 31 | 64,
             Self::Left | Self::Right | Self::Up | Self::Down | Self::Pane | Self::Cancel => 31,
             Self::Filter | Self::Refresh => 2,
             Self::Edit => 1 | 4 | 8,
@@ -130,6 +132,11 @@ fn defaults() -> Vec<(&'static str, Action, Vec<&'static str>)> {
         ("next_tab", Action::NextTab, vec!["gt"]),
         ("previous_tab", Action::PreviousTab, vec!["gT"]),
         ("pane_prefix", Action::Pane, vec!["Ctrl-w"]),
+        ("focus_pane_1", Action::FocusPane(1), vec!["1"]),
+        ("focus_pane_2", Action::FocusPane(2), vec!["2"]),
+        ("focus_pane_3", Action::FocusPane(3), vec!["3"]),
+        ("focus_pane_4", Action::FocusPane(4), vec!["4"]),
+        ("focus_pane_5", Action::FocusPane(5), vec!["5"]),
         ("edit", Action::Edit, vec!["i"]),
         ("append", Action::Append, vec!["a"]),
         ("undo", Action::Undo, vec!["u"]),
@@ -200,6 +207,7 @@ impl Keybindings {
                         | Action::NextFocus
                         | Action::PreviousFocus
                         | Action::Pane
+                        | Action::FocusPane(_)
                         | Action::Cancel
                         | Action::WordBegin
                         | Action::WordEnd
