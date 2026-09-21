@@ -33,10 +33,23 @@ pub struct Cli {
     /// Emit JSON for lookup, history, and search (diagnostics go to stderr)
     #[arg(long, global = true)]
     pub json: bool,
+    /// Request a fresh result instead of reusing an exact match from history
+    #[arg(long)]
+    pub fresh: bool,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Print a shell script that enables Tab completion from saved history
+    Completions {
+        #[arg(value_enum)]
+        shell: crate::completion::Shell,
+    },
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        #[arg(last = true)]
+        words: Vec<String>,
+    },
     /// Open the interactive lookup TUI
     Shell,
     /// Browse saved lookup attempts
@@ -78,6 +91,11 @@ fn nonempty(value: &str) -> Result<String, String> {
 
 impl Cli {
     pub fn validate(&self) -> Result<(), LookupError> {
+        if self.fresh && self.word.is_none() {
+            return Err(LookupError::InvalidInput(
+                "--fresh requires a lookup word.".into(),
+            ));
+        }
         if self.json && matches!(self.command, Some(Command::Shell)) {
             return Err(LookupError::InvalidInput(
                 "--json is available for lookup, history, and search; shell is interactive.".into(),

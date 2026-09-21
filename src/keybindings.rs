@@ -24,11 +24,13 @@ pub enum Action {
     Undo,
     Redo,
     Paste,
+    PasteBefore,
     WordBegin,
     WordEnd,
     Visual,
     YankSelection,
     DeleteSelection,
+    DeleteLine,
     ChangeSelection,
     Submit,
     NextFocus,
@@ -57,8 +59,9 @@ impl Action {
             Self::Left | Self::Right | Self::Up | Self::Down | Self::Pane | Self::Cancel => 31,
             Self::Filter | Self::Refresh => 2,
             Self::Edit => 1 | 4 | 8,
-            Self::Append | Self::Undo | Self::Redo => 4,
+            Self::Append | Self::Undo | Self::Redo | Self::DeleteLine => 4,
             Self::Paste
+            | Self::PasteBefore
             | Self::Visual
             | Self::WordBegin
             | Self::WordEnd
@@ -132,11 +135,13 @@ fn defaults() -> Vec<(&'static str, Action, Vec<&'static str>)> {
         ("undo", Action::Undo, vec!["u"]),
         ("redo", Action::Redo, vec!["Ctrl-r"]),
         ("paste", Action::Paste, vec!["p"]),
+        ("paste_before", Action::PasteBefore, vec!["P"]),
         ("word_begin", Action::WordBegin, vec!["Ctrl-Left", "b"]),
         ("word_end", Action::WordEnd, vec!["Ctrl-Right", "e"]),
         ("visual", Action::Visual, vec!["v"]),
         ("yank_selection", Action::YankSelection, vec!["y"]),
         ("delete_selection", Action::DeleteSelection, vec!["d", "x"]),
+        ("delete_line", Action::DeleteLine, vec!["dd"]),
         ("change_selection", Action::ChangeSelection, vec!["c"]),
         ("submit", Action::Submit, vec!["Enter"]),
         ("next_focus", Action::NextFocus, vec!["Tab"]),
@@ -182,9 +187,16 @@ impl Keybindings {
                     return Err("Ctrl-c is reserved for emergency exit.".into());
                 }
                 let mut contexts = action.contexts();
+                // `d` is an operator prefix in normal mode and an immediate cut
+                // in visual mode. Keep existing profiles with d/x compatible.
+                if action == Action::DeleteSelection && label == "d" {
+                    contexts &= !(Context::Input as u8);
+                }
                 if matches!(
                     action,
                     Action::Submit
+                        | Action::Up
+                        | Action::Down
                         | Action::NextFocus
                         | Action::PreviousFocus
                         | Action::Pane

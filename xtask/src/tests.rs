@@ -125,6 +125,31 @@ fn task_help_and_invalid_flags_are_handled_before_building() {
 }
 
 #[test]
+fn completion_setup_defaults_to_all_and_accepts_a_shell_filter() {
+    assert!(matches!(
+        Cli::try_parse_from(["xtask", "setup:completions"])
+            .unwrap()
+            .task,
+        Task::SetupCompletions { shell: None }
+    ));
+    for (name, expected) in [
+        ("bash", completions::Shell::Bash),
+        ("nushell", completions::Shell::Nushell),
+        ("nu", completions::Shell::Nushell),
+    ] {
+        let Task::SetupCompletions { shell } =
+            Cli::try_parse_from(["xtask", "setup:completions", "--shell", name])
+                .unwrap()
+                .task
+        else {
+            panic!()
+        };
+        assert_eq!(shell, Some(expected));
+    }
+    assert!(Cli::try_parse_from(["xtask", "setup:completions", "--shell", "unknown"]).is_err());
+}
+
+#[test]
 fn cargo_command_is_locked_versioned_and_selects_only_the_application() {
     let temporary = TempDir::new().unwrap();
     let options = options(temporary.path(), "x86_64-unknown-linux-gnu");

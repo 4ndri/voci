@@ -1,4 +1,5 @@
 mod args;
+mod completions;
 
 use anyhow::{Context, Result, ensure};
 use args::{Cli, Common, Profile, Task};
@@ -320,6 +321,9 @@ fn forwarded(command: &mut Command, arguments: &[OsString]) {
 }
 
 fn execute(cli: Cli, root: &Path) -> Result<()> {
+    if let Task::SetupCompletions { shell } = cli.task {
+        return completions::setup(shell);
+    }
     if let Task::Version { expect_tag } = cli.task {
         println!("{}", version_info(root, expect_tag.as_deref())?.version);
         return Ok(());
@@ -388,8 +392,9 @@ fn execute(cli: Cli, root: &Path) -> Result<()> {
                 command.arg("--root").arg(path);
             }
             run(&mut command)?;
+            completions::setup(None)?;
         }
-        Task::Version { .. } => unreachable!(),
+        Task::Version { .. } | Task::SetupCompletions { .. } => unreachable!(),
     }
     Ok(())
 }

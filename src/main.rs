@@ -46,6 +46,9 @@ async fn main() -> ExitCode {
             fail(code, message)
         }
     };
+    if cli.fresh && cli.word.is_none() {
+        return fail(2, "--fresh requires a lookup word.");
+    }
     if cli.word.is_none() && cli.command.is_none() {
         let _ = Cli::command().print_help();
         println!();
@@ -53,6 +56,17 @@ async fn main() -> ExitCode {
     }
     if cli.word.is_some() && cli.command.is_some() {
         return fail(2, "A lookup word cannot be combined with a subcommand.");
+    }
+    if let Some(Command::Completions { shell }) = &cli.command {
+        return output(shell.script());
+    }
+    if let Some(Command::Complete { words }) = &cli.command {
+        let values = voci::completion::complete(words).await;
+        return if cli.json {
+            output_json(&values)
+        } else {
+            output(&values.join("\n"))
+        };
     }
     if let Some(Command::History(options) | Command::Search { options, .. }) = &cli.command {
         let store = match voci::config::history_path(cli.config.as_deref(), cli.database.as_deref())
@@ -101,6 +115,24 @@ async fn main() -> ExitCode {
     }
     let coordinator = Coordinator::new(cli.config.clone(), cli.provider, cli.database.clone());
     if let Some(request) = cli.request() {
+        if !cli.fresh
+            && let Ok(store) = &coordinator.history
+        {
+            match store.saved_result(request.clone()).await {
+                Ok(Some(entry)) => {
+                    let result = entry
+                        .result()
+                        .expect("saved_result returns successful results");
+                    return if cli.json {
+                        output_json(result)
+                    } else {
+                        output(&render_result(result))
+                    };
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!("{}", safe_text(&error.to_string())),
+            }
+        }
         let (cancel, receiver) = tokio::sync::watch::channel(false);
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let operation = coordinator.run(request, receiver, Some(progress_tx));

@@ -66,6 +66,289 @@ fn db_path(home: &Path) -> PathBuf {
     }
 }
 #[tokio::test]
+async fn nushell_completion_decodes_open_quotes_and_quoted_database_paths() {
+    match std::process::Command::new("nu").arg("--version").output() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("Skipping Nushell adapter check; nu is not installed");
+            return;
+        }
+        result => assert!(result.unwrap().status.success()),
+    }
+    let root = tempfile::tempdir().unwrap();
+    let store = HistoryStore::new(root.path().join("saved history.db"));
+    for query in [
+        "Vergangenheit",
+        "ice cream",
+        "say \"hello\"",
+        "Grüße",
+        "cash$env.HOME",
+        "star*",
+    ] {
+        let id = store.start(request(query), None).await.unwrap();
+        store
+            .finish(id, Finished::from_result(&Ok(result(query))), None)
+            .await
+            .unwrap();
+    }
+    let cases = [
+        ("Ver", "Vergangenheit"),
+        ("\"Ver", "Vergangenheit"),
+        ("'Ver", "Vergangenheit"),
+        ("`Ver", "Vergangenheit"),
+        ("\"Ver\"", "Vergangenheit"),
+        ("\"ice cr", "\"ice cream\""),
+        ("\"say \\\"h", r#""say \"hello\"""#),
+        ("Grü", "Grüße"),
+        ("cash", "\"cash$env.HOME\""),
+        ("star", "\"star*\""),
+    ];
+    let spans: Vec<_> = cases
+        .iter()
+        .map(|(prefix, _)| {
+            vec![
+                assert_cmd::cargo::cargo_bin!("voci")
+                    .to_string_lossy()
+                    .into_owned(),
+                "--database".into(),
+                serde_json::to_string(store.path().to_str().unwrap()).unwrap(),
+                (*prefix).into(),
+            ]
+        })
+        .collect();
+    let output = std::process::Command::new("nu")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["--no-config-file", "-c", "source assets/completions/voci.nu; $env.VOCI_TEST_SPANS | from json | each {|spans| do $env.config.completions.external.completer $spans } | to json"])
+        .env("VOCI_TEST_SPANS", serde_json::to_string(&spans).unwrap())
+        .output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|(_, completed)| {
+            serde_json::json!([
+                {"value": completed, "description": "voci"}
+            ])
+        })
+        .collect();
+    assert_eq!(actual, serde_json::json!(expected));
+    assert_eq!(
+        store
+            .page(HistoryFilter::default(), None, 50, false)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        6
+    );
+}
+
+#[tokio::test]
+async fn tab_completion_and_exact_cli_reuse_are_read_only_and_skip_provider_setup() {
+    let home = tempfile::tempdir().unwrap();
+    let database = home.path().join("saved.db");
+    let config = home.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "provider='invalid'\n[history]\ndatabase='saved.db'\n",
+    )
+    .unwrap();
+    let store = HistoryStore::new(database.clone());
+    for query in ["Straße", "ice cream", "Straße"] {
+        let id = store.start(request(query), None).await.unwrap();
+        store
+            .finish(id, Finished::from_result(&Ok(result(query))), None)
+            .await
+            .unwrap();
+    }
+    let failed = store.start(request("Straße"), None).await.unwrap();
+    store
+        .finish(
+            failed,
+            Finished::from_result(&Err(LookupError::Network)),
+            None,
+        )
+        .await
+        .unwrap();
+    for (words, expected) in [
+        (vec!["STRASS"], vec!["Straße"]),
+        (vec!["ice"], vec!["ice cream"]),
+        (vec!["value"], vec![]),
+        (vec!["--from", "de", "str"], vec!["Straße"]),
+        (vec!["--from", "en", "str"], vec![]),
+        (vec!["--to", "de", "str"], vec![]),
+        (vec!["--from", "d"], vec!["de"]),
+    ] {
+        let mut command = support::command();
+        support::isolate(&mut command, home.path());
+        let output = command
+            .args(["--json", "__complete", "--", "--config"])
+            .arg(&config)
+            .args(words)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<Vec<String>>(&output.stdout).unwrap(),
+            expected
+        );
+    }
+    // Completion also honors an explicit database even when config cannot be read.
+    let output = support::command()
+        .args([
+            "--json",
+            "__complete",
+            "--",
+            "--config",
+            "missing.toml",
+            "--database",
+        ])
+        .arg(&database)
+        .arg("str")
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&output.stdout).unwrap(),
+        ["Straße"]
+    );
+    for args in [vec!["STRASSE"], vec!["--json", "STRASSE"]] {
+        let output = support::command()
+            .arg("--config")
+            .arg(&config)
+            .args(&args)
+            .assert()
+            .success()
+            .get_output()
+            .clone();
+        assert!(output.stderr.is_empty());
+        if args.contains(&"--json") {
+            let saved: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(saved["query"], "Straße");
+            assert_eq!(saved["candidates"].as_array().unwrap().len(), 12);
+        } else {
+            assert!(String::from_utf8(output.stdout).unwrap().contains("Straße"));
+        }
+    }
+    assert_eq!(
+        store
+            .page(HistoryFilter::default(), None, 50, false)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        4
+    );
+    for args in [
+        vec!["--fresh", "Straße"],
+        vec!["Stra"],
+        vec!["--from", "en", "Straße"],
+    ] {
+        support::command()
+            .arg("--config")
+            .arg(&config)
+            .args(args)
+            .assert()
+            .code(1);
+    }
+    assert_eq!(
+        store
+            .page(HistoryFilter::default(), None, 50, false)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        7
+    );
+}
+#[tokio::test]
+async fn lookup_suggestions_search_saved_successes_before_limiting_and_respect_languages() {
+    let root = tempfile::tempdir().unwrap();
+    let store = HistoryStore::new(root.path().join("voci.db"));
+    assert!(
+        store
+            .suggestions(request("word"), 5)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    assert!(!store.path().exists());
+    for query in ["Verbindlichkeit", "Verbindung"] {
+        let id = store.start(request(query), None).await.unwrap();
+        store
+            .finish(id, Finished::from_result(&Ok(result(query))), None)
+            .await
+            .unwrap();
+    }
+    for _ in 0..6 {
+        let id = store.start(request("Verbindlichkeit"), None).await.unwrap();
+        store
+            .finish(id, Finished::from_result(&Err(LookupError::Network)), None)
+            .await
+            .unwrap();
+    }
+    store.start(request("Verbindlichkeit"), None).await.unwrap();
+    let page = store.suggestions(request(" VERBIND "), 1).await.unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].query, "Verbindung");
+    assert!(page.has_more);
+    for query in ["STRASSE", "100%_", "é"] {
+        assert_eq!(
+            store
+                .suggestions(request(query), 5)
+                .await
+                .unwrap()
+                .entries
+                .len(),
+            2
+        );
+    }
+    for (from, to, count) in [
+        (None, None, 2),
+        (Some(Language::German), None, 2),
+        (None, Some(Language::English), 2),
+        (Some(Language::English), None, 0),
+        (None, Some(Language::German), 0),
+    ] {
+        let page = store
+            .suggestions(
+                LookupRequest {
+                    query: "verbind".into(),
+                    from,
+                    to,
+                },
+                5,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.entries.len(), count);
+    }
+    assert!(
+        store
+            .suggestions(request("  "), 5)
+            .await
+            .unwrap()
+            .entries
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .page(HistoryFilter::default(), None, 50, false)
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        9
+    );
+}
+#[tokio::test]
 async fn immutable_events_preserve_repeats_complete_results_and_unfinished_attempts() {
     let root = tempfile::tempdir().unwrap();
     let store = HistoryStore::new(root.path().join("voci.db"));

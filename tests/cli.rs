@@ -90,3 +90,52 @@ fn tui_rejects_nonterminal_before_credential_loading() {
         .stdout("")
         .stderr(predicate::str::contains("requires an interactive terminal"));
 }
+
+#[test]
+fn fresh_requires_a_lookup_word() {
+    for arguments in [
+        vec!["--fresh"],
+        vec!["--fresh", "history"],
+        vec!["--fresh", "shell"],
+    ] {
+        command()
+            .args(arguments)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("--fresh requires a lookup word"));
+    }
+}
+
+#[test]
+fn completion_scripts_and_missing_history_need_no_configuration() {
+    for (shell, marker) in [
+        ("bash", "COMPREPLY"),
+        ("nushell", "external.completer"),
+        ("nu", "external.completer"),
+    ] {
+        command()
+            .args(["--config", "missing.toml", "completions", shell])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(marker));
+    }
+    command()
+        .args([
+            "--json",
+            "__complete",
+            "--",
+            "--config",
+            "missing.toml",
+            "word",
+        ])
+        .assert()
+        .success()
+        .stdout("[]\n")
+        .stderr("");
+    command()
+        .args(["__complete", "--", "--from", "de", "word"])
+        .assert()
+        .success()
+        .stdout("")
+        .stderr("");
+}

@@ -1,5 +1,5 @@
 mod input;
-use input::{Input, InputEffect, InputMode, SelectionAction};
+use input::{Input, InputEffect, InputMode, PastePosition, SelectionAction};
 
 use crate::{
     clipboard::{Clipboard, DesktopClipboard},
@@ -84,13 +84,13 @@ enum Effect {
     },
     Copy(String),
     CopySelection(String, SelectionAction),
-    Paste,
+    Paste(PastePosition),
 }
 impl From<InputEffect> for Effect {
     fn from(effect: InputEffect) -> Self {
         match effect {
             InputEffect::None => Self::None,
-            InputEffect::Paste => Self::Paste,
+            InputEffect::Paste(position) => Self::Paste(position),
             InputEffect::CopySelection(text, cut) => Self::CopySelection(text, cut),
         }
     }
@@ -108,6 +108,10 @@ struct App {
     generation: u64,
     recent: Vec<HistoryEntry>,
     recent_state: ListState,
+    suggestions: Vec<HistoryEntry>,
+    suggestion_state: ListState,
+    suggestion_query: Option<(String, Option<Language>, Option<Language>)>,
+    suggestion_generation: u64,
     preview: Option<HistoryEntry>,
     entries: Vec<HistoryEntry>,
     history_state: ListState,
@@ -142,6 +146,10 @@ impl App {
             generation: 0,
             recent: vec![],
             recent_state: ListState::default(),
+            suggestions: vec![],
+            suggestion_state: ListState::default(),
+            suggestion_query: None,
+            suggestion_generation: 0,
             preview: None,
             entries: vec![],
             history_state: ListState::default(),
@@ -168,6 +176,42 @@ impl App {
                 .selected()
                 .and_then(|i| self.entries.get(i))
         }
+    }
+    fn update_suggestion_query(&mut self) -> bool {
+        let query = (self.tab == Tab::Lookup
+            && self.focus == Focus::Input
+            && self.input.get_mode() == InputMode::Insert
+            && self.dialog.is_none()
+            && !self.pane_mode
+            && !self.loading
+            && !self.input.text().trim().is_empty())
+        .then(|| (self.input.text(), self.source, self.target));
+        if query == self.suggestion_query {
+            return false;
+        }
+        self.suggestion_query = query;
+        self.suggestion_generation += 1;
+        self.suggestions.clear();
+        self.suggestion_state = ListState::default();
+        true
+    }
+    fn apply_suggestions(&mut self, generation: u64, result: Result<HistoryPage, String>) {
+        if generation != self.suggestion_generation || self.suggestion_query.is_none() {
+            return;
+        }
+        match result {
+            Ok(page) => self.suggestions = page.entries,
+            Err(error) => self.notice = error,
+        }
+    }
+    fn has_suggestions(&self) -> bool {
+        self.tab == Tab::Lookup
+            && self.focus == Focus::Input
+            && self.input.get_mode() == InputMode::Insert
+            && self.dialog.is_none()
+            && !self.pane_mode
+            && !self.loading
+            && !self.suggestions.is_empty()
     }
     fn result(&self) -> Option<&LookupResult> {
         if self.tab == Tab::Lookup && self.preview.is_none() {
@@ -439,11 +483,13 @@ impl App {
                     | Action::Home
                     | Action::End
                     | Action::Paste
+                    | Action::PasteBefore
                     | Action::WordBegin
                     | Action::WordEnd
                     | Action::Visual
                     | Action::YankSelection
                     | Action::DeleteSelection
+                    | Action::DeleteLine
                     | Action::ChangeSelection
             )
         {
@@ -583,10 +629,10 @@ impl App {
     }
     fn clipboard_effect(&mut self, clipboard: &mut impl Clipboard, effect: Effect) {
         match effect {
-            Effect::Paste => match clipboard.paste() {
+            Effect::Paste(position) => match clipboard.paste() {
                 Ok(text) => {
                     if let Some(input) = self.focused_input_mut() {
-                        self.notice = match input.paste(&text) {
+                        self.notice = match input.paste_at(&text, position) {
                             Ok(()) => "Pasted from clipboard.".into(),
                             Err(error) => error,
                         };
@@ -606,12 +652,13 @@ impl App {
                         match action {
                             SelectionAction::Yank => input.mode(InputMode::Normal),
                             SelectionAction::Cut => input.cut(),
+                            SelectionAction::CutLine => input.cut_line(),
                             SelectionAction::Change => input.change_selection(),
                         }
                     }
                     self.notice = match action {
                         SelectionAction::Yank => "Selection copied to clipboard.",
-                        SelectionAction::Cut => "Text cut to clipboard.",
+                        SelectionAction::Cut | SelectionAction::CutLine => "Text cut to clipboard.",
                         SelectionAction::Change => "Selection cut to clipboard; insert mode.",
                     }
                     .into();
@@ -841,6 +888,38 @@ impl App {
     }
     // Command dispatch is shared by insert-mode lookup and filter fields.
     fn input_command(&mut self, action: Action) -> Effect {
+        if self.has_suggestions() {
+            match action {
+                Action::Up | Action::Down => {
+                    let selected = self.suggestion_state.selected();
+                    self.suggestion_state.select(match (action, selected) {
+                        (Action::Down, None) => Some(0),
+                        (Action::Down, Some(i)) if i + 1 < self.suggestions.len() => Some(i + 1),
+                        (Action::Up, Some(i)) if i > 0 => Some(i - 1),
+                        (Action::Up, None) => Some(self.suggestions.len() - 1),
+                        _ => None,
+                    });
+                    return Effect::None;
+                }
+                Action::Submit => {
+                    if let Some(entry) = self
+                        .suggestion_state
+                        .selected()
+                        .and_then(|i| self.suggestions.get(i))
+                        .cloned()
+                    {
+                        self.input = Input::with_text(&entry.query);
+                        self.preview = Some(entry);
+                        self.input.mode(InputMode::Normal);
+                        self.focus = Focus::Details;
+                        self.select_candidate(Some(0));
+                        self.resolver.reset();
+                        return Effect::None;
+                    }
+                }
+                _ => {}
+            }
+        }
         match action {
             Action::Pane => self.toggle_panes(),
             Action::Cancel => return self.escape(),
@@ -977,18 +1056,28 @@ impl App {
             )
         } else if let Some(input) = self.focused_input() {
             let actions = match input.get_mode() {
+                InputMode::Insert if self.has_suggestions() => format!(
+                    "↑/↓ history · {} {} · Esc dismiss",
+                    self.bindings.label(Action::Submit),
+                    if self.suggestion_state.selected().is_some() {
+                        "opens saved result"
+                    } else {
+                        "new lookup"
+                    }
+                ),
                 InputMode::Insert => format!(
                     "{} submits · Esc normal",
                     self.bindings.label(Action::Submit)
                 ),
                 InputMode::Normal => format!(
-                    "{}/{} insert · {} append · {} paste · {} select · {} cut",
+                    "{}/{} insert · {} append · {}/{} paste after/before · {} select · {} cut line",
                     self.bindings.label(Action::Submit),
                     self.bindings.label(Action::Edit),
                     self.bindings.label(Action::Append),
                     self.bindings.label(Action::Paste),
+                    self.bindings.label(Action::PasteBefore),
                     self.bindings.label(Action::Visual),
-                    self.bindings.label(Action::DeleteSelection)
+                    self.bindings.label(Action::DeleteLine)
                 ),
                 InputMode::Visual => format!(
                     "{} copy · {} cut · {} change · {} replace · Esc normal",
@@ -1110,6 +1199,39 @@ impl App {
                     &mut self.recent_state,
                 );
             }
+        }
+        if self.has_suggestions() {
+            let popup = Rect::new(
+                rows[0].x,
+                rows[0].bottom(),
+                rows[0].width,
+                (self.suggestions.len() as u16 + 2).min(area.height.saturating_sub(3)),
+            );
+            let items = self
+                .suggestions
+                .iter()
+                .map(|entry| {
+                    let result = entry.result();
+                    ListItem::new(format!(
+                        "{} · {} · {}",
+                        safe_text(&entry.query),
+                        result.map(|r| r.pair.to_string()).unwrap_or_default(),
+                        result
+                            .and_then(|r| r.candidates.first())
+                            .map(|c| safe_text(&c.text))
+                            .unwrap_or_default(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            frame.render_widget(Clear, popup);
+            frame.render_stateful_widget(
+                List::new(items)
+                    .block(bordered(" From history ", true))
+                    .highlight_symbol("> ")
+                    .highlight_style(Style::default().fg(Color::Cyan)),
+                popup,
+                &mut self.suggestion_state,
+            );
         }
     }
     fn draw_history(&mut self, frame: &mut Frame, area: Rect) {
@@ -1422,6 +1544,26 @@ fn draw_input(frame: &mut Frame, input: &Input, area: Rect, block: Block<'_>, fo
 enum Message {
     Lookup(u64, Completion),
     History(u64, bool, (bool, bool), Result<HistoryPage, String>),
+    Suggestions(u64, Result<HistoryPage, String>),
+}
+fn read_suggestions(
+    jobs: &mut tokio::task::JoinSet<Message>,
+    coordinator: &Coordinator,
+    request: LookupRequest,
+    generation: u64,
+) -> tokio::task::AbortHandle {
+    let store = coordinator.history.clone();
+    jobs.spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let result = match store {
+            Ok(store) => store
+                .suggestions(request, 5)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(error) => Err(error),
+        };
+        Message::Suggestions(generation, result)
+    })
 }
 fn read_history(
     jobs: &mut tokio::task::JoinSet<Message>,
@@ -1488,7 +1630,25 @@ pub async fn run(
         true,
     );
     let mut cursor_style = None;
+    let mut suggestion_job: Option<tokio::task::AbortHandle> = None;
     let outcome = loop {
+        if app.update_suggestion_query() {
+            if let Some(job) = suggestion_job.take() {
+                job.abort();
+            }
+            if let Some((query, from, to)) = &app.suggestion_query {
+                suggestion_job = Some(read_suggestions(
+                    &mut jobs,
+                    &coordinator,
+                    LookupRequest {
+                        query: query.clone(),
+                        from: *from,
+                        to: *to,
+                    },
+                    app.suggestion_generation,
+                ));
+            }
+        }
         let desired_style = app
             .focused_input()
             .map_or(SetCursorStyle::SteadyBlock, |input| {
@@ -1534,6 +1694,11 @@ pub async fn run(
                         app.apply_history(generation, recent, last, preserve, result);
                         Effect::None
                     },
+                    Ok(Message::Suggestions(generation, result)) => {
+                        app.apply_suggestions(generation, result);
+                        Effect::None
+                    },
+                    Err(error) if error.is_cancelled() => Effect::None,
                     Err(error) => {
                         app.notice = format!("Background task failed: {error}");
                         Effect::None
@@ -1582,7 +1747,7 @@ pub async fn run(
                     false,
                 );
             }
-            effect @ (Effect::Copy(_) | Effect::CopySelection(..) | Effect::Paste) => {
+            effect @ (Effect::Copy(_) | Effect::CopySelection(..) | Effect::Paste(_)) => {
                 app.clipboard_effect(&mut clipboard, effect);
             }
             Effect::None => {}
@@ -1624,6 +1789,132 @@ mod tests {
     fn enter() -> Event {
         Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
     }
+    #[tokio::test]
+    async fn typing_can_open_saved_results_without_provider_setup_or_a_new_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(&config, "provider='invalid'").unwrap();
+        let coordinator = Coordinator::new(Some(config), None, Some(root.path().join("voci.db")));
+        let store = coordinator.history.as_ref().unwrap();
+        let result = scrolling_app(0, 12).live.unwrap();
+        let id = store
+            .start(
+                LookupRequest {
+                    query: "word".into(),
+                    from: None,
+                    to: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        store
+            .finish(
+                id.clone(),
+                crate::history::Finished::from_result(&Ok(result)),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut app = App::new(None, None, Keybindings::default());
+        app.event(Event::Paste("wor".into()));
+        assert!(app.update_suggestion_query());
+        let mut jobs = tokio::task::JoinSet::new();
+        read_suggestions(
+            &mut jobs,
+            &coordinator,
+            LookupRequest {
+                query: app.input.text(),
+                from: None,
+                to: None,
+            },
+            app.suggestion_generation,
+        );
+        let Message::Suggestions(generation, result) = jobs.join_next().await.unwrap().unwrap()
+        else {
+            panic!("expected saved suggestions")
+        };
+        app.apply_suggestions(generation, result);
+        for (width, height) in [(24, 12), (60, 20), (120, 32)] {
+            assert!(screen(&mut app, width, height).contains("From history"));
+        }
+        assert!(matches!(app.event(enter()), Effect::Submit));
+        app.event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert!(matches!(app.event(enter()), Effect::None));
+        assert_eq!(app.selected().unwrap().id, id);
+        assert_eq!(app.result().unwrap().candidates.len(), 12);
+        assert_eq!(app.input.text(), "word");
+        assert_eq!(app.input.cursor(), "word".len());
+        assert_eq!(app.focus, Focus::Details);
+        assert!(!app.loading);
+        assert_eq!(app.generation, 0);
+        assert!(app.update_suggestion_query());
+        assert!(!screen(&mut app, 120, 32).contains("From history"));
+        assert_eq!(
+            store
+                .page(HistoryFilter::default(), None, 50, false)
+                .await
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+    }
+    #[test]
+    fn suggestion_selection_resets_on_edits_and_ignores_outdated_reads() {
+        let mut app = App::new(None, None, Keybindings::default());
+        app.event(key('w'));
+        app.update_suggestion_query();
+        let old = app.suggestion_generation;
+        app.apply_suggestions(old, page(&[2, 1]));
+        app.input_command(Action::Down);
+        assert_eq!(app.suggestion_state.selected(), Some(0));
+        app.input_command(Action::Up);
+        assert_eq!(app.suggestion_state.selected(), None);
+        app.input_command(Action::Up);
+        assert_eq!(app.suggestion_state.selected(), Some(1));
+        app.event(key('x'));
+        assert!(app.update_suggestion_query());
+        app.apply_suggestions(old, page(&[2, 1]));
+        app.apply_suggestions(old, Err("stale error".into()));
+        assert!(app.suggestions.is_empty());
+        assert!(app.notice.is_empty());
+        assert_eq!(app.suggestion_state.selected(), None);
+        assert!(matches!(app.event(enter()), Effect::Submit));
+        app.apply_suggestions(app.suggestion_generation, page(&[1]));
+        app.event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.has_suggestions());
+        assert!(app.update_suggestion_query());
+        app.event(enter());
+        assert!(app.update_suggestion_query());
+        app.source = Some(Language::German);
+        assert!(app.update_suggestion_query());
+        app.input = Input::default();
+        assert!(app.update_suggestion_query());
+        assert!(app.suggestion_query.is_none());
+    }
+    #[test]
+    fn suggestion_navigation_honors_command_remaps_and_keeps_letters_as_text() {
+        let bindings =
+            Keybindings::parse("[navigation]\ndown=['Alt-n','j']\nup=['Alt-p','k']").unwrap();
+        let mut app = App::new(None, None, bindings);
+        app.input.insert("w");
+        app.update_suggestion_query();
+        app.apply_suggestions(app.suggestion_generation, page(&[1]));
+        app.event(key('j'));
+        assert_eq!(app.input.text(), "wj");
+        assert_eq!(app.suggestion_state.selected(), None);
+        app.update_suggestion_query();
+        app.apply_suggestions(app.suggestion_generation, page(&[1]));
+        app.event(Event::Key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::ALT,
+        )));
+        assert_eq!(app.suggestion_state.selected(), Some(0));
+        assert!(matches!(app.event(enter()), Effect::None));
+        assert!(app.preview.is_some());
+    }
     #[derive(Default)]
     struct TestClipboard {
         text: String,
@@ -1645,7 +1936,7 @@ mod tests {
         }
     }
     #[test]
-    fn normal_input_enters_insert_and_pastes_at_unicode_cursor() {
+    fn normal_input_enters_insert_and_pastes_after_unicode_cursor() {
         let mut app = App::new(None, None, Keybindings::default());
         app.input.insert("ae\u{301}猫z");
         app.escape();
@@ -1656,14 +1947,14 @@ mod tests {
             ..Default::default()
         };
         let effect = app.event(key('p'));
-        assert!(matches!(effect, Effect::Paste));
+        assert!(matches!(effect, Effect::Paste(_)));
         app.clipboard_effect(&mut clipboard, effect);
-        assert_eq!(app.input.text(), "ae\u{301}ö猫z");
-        assert_eq!(app.input.cursor(), "ae\u{301}ö".len());
+        assert_eq!(app.input.text(), "ae\u{301}猫öz");
+        assert_eq!(app.input.cursor(), "ae\u{301}猫ö".len());
         assert!(matches!(app.event(enter()), Effect::None));
         assert!(app.input.get_mode() == InputMode::Insert);
         app.event(key('p'));
-        assert_eq!(app.input.text(), "ae\u{301}öp猫z");
+        assert_eq!(app.input.text(), "ae\u{301}猫öpz");
         assert!(matches!(app.event(enter()), Effect::Submit));
     }
     #[test]
@@ -1927,9 +2218,192 @@ mod tests {
         }
     }
     #[test]
-    fn d_and_x_cut_selection_or_current_grapheme_only_after_clipboard_success() {
+    fn delete_line_copies_before_deleting_and_is_one_undo_step_in_both_inputs() {
+        for (profile, sequence) in [
+            (
+                include_str!("../assets/keybindings/qwerty.keybinding.toml"),
+                "dd",
+            ),
+            (
+                include_str!("../assets/keybindings/neo-noted.keybinding.toml"),
+                "dd",
+            ),
+            ("[actions]\ndelete_line=['zz']", "zz"),
+        ] {
+            for filter in [false, true] {
+                let original = "a e\u{301}👩‍💻猫";
+                for cursor in [0, 2, original.len()] {
+                    let mut app = App::new(None, None, Keybindings::parse(profile).unwrap());
+                    if filter {
+                        app.tab = Tab::History;
+                        app.focus = Focus::History;
+                        app.event(key('/'));
+                    }
+                    let input = app.focused_input_mut().unwrap();
+                    *input = Input::with_text(original);
+                    input.mode(InputMode::Normal);
+                    input.set_cursor(cursor);
+                    let mut clipboard = TestClipboard {
+                        text: "previous".into(),
+                        unavailable: true,
+                    };
+                    for unavailable in [true, false] {
+                        clipboard.unavailable = unavailable;
+                        let mut chars = sequence.chars();
+                        assert!(matches!(
+                            app.event(key(chars.next().unwrap())),
+                            Effect::None
+                        ));
+                        assert_eq!(app.focused_input().unwrap().text(), original);
+                        let effect = app.event(key(chars.next().unwrap()));
+                        app.clipboard_effect(&mut clipboard, effect);
+                        let input = app.focused_input().unwrap();
+                        if unavailable {
+                            assert_eq!(input.text(), original);
+                            assert_eq!(input.cursor(), cursor);
+                            assert_eq!(clipboard.text, "previous");
+                            app.event(key('u')); // Failed cut must not add an undo step.
+                            assert_eq!(app.focused_input().unwrap().text(), original);
+                        } else {
+                            assert_eq!(input.text(), "");
+                            assert_eq!(input.cursor(), 0);
+                            assert!(input.get_mode() == InputMode::Normal);
+                            assert_eq!(clipboard.text, original);
+                        }
+                    }
+                    // Deleting an empty line preserves the register and undo history.
+                    for c in sequence.chars() {
+                        assert!(matches!(app.event(key(c)), Effect::None));
+                    }
+                    assert_eq!(clipboard.text, original);
+                    app.event(key('u'));
+                    assert_eq!(app.focused_input().unwrap().text(), original);
+                    assert_eq!(app.focused_input().unwrap().cursor(), cursor);
+                    app.event(Event::Key(KeyEvent::new(
+                        KeyCode::Char('r'),
+                        KeyModifiers::CONTROL,
+                    )));
+                    assert_eq!(app.focused_input().unwrap().text(), "");
+                    let effect = app.event(key('p'));
+                    app.clipboard_effect(&mut clipboard, effect);
+                    assert_eq!(app.focused_input().unwrap().text(), original);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn delete_line_prefix_can_be_cancelled_and_insert_mode_keeps_literal_keys() {
+        let mut app = App::new(None, None, Keybindings::default());
+        for c in "ddpP".chars() {
+            app.event(key(c));
+        }
+        assert_eq!(app.input.text(), "ddpP");
+        app.escape();
+        app.event(key('d'));
+        assert!(app.resolver.pending());
+        app.escape();
+        assert!(!app.resolver.pending());
+        assert!(matches!(app.event(key('d')), Effect::None));
+        assert_eq!(app.input.text(), "ddpP");
+        app.event(key('h')); // An unrelated key cancels the operator prefix.
+        assert!(!app.resolver.pending());
+        assert!(matches!(app.event(key('d')), Effect::None));
+        assert_eq!(app.input.text(), "ddpP");
+    }
+
+    #[test]
+    fn paste_before_and_after_respect_graphemes_failures_and_undo_in_both_inputs() {
+        use unicode_segmentation::UnicodeSegmentation;
+
+        for (profile, after, before) in [
+            (
+                include_str!("../assets/keybindings/qwerty.keybinding.toml"),
+                'p',
+                'P',
+            ),
+            (
+                include_str!("../assets/keybindings/neo-noted.keybinding.toml"),
+                'p',
+                'P',
+            ),
+            ("[actions]\npaste=['s']\npaste_before=['Shift-s']", 's', 'S'),
+        ] {
+            for filter in [false, true] {
+                for original in ["", "ae\u{301}👩‍💻猫z"] {
+                    for cursor in [
+                        0,
+                        1.min(original.len()),
+                        "ae\u{301}".len().min(original.len()),
+                        original.len(),
+                    ] {
+                        for (binding, paste_after) in [(after, true), (before, false)] {
+                            let mut app =
+                                App::new(None, None, Keybindings::parse(profile).unwrap());
+                            if filter {
+                                app.tab = Tab::History;
+                                app.focus = Focus::History;
+                                app.event(key('/'));
+                            }
+                            let input = app.focused_input_mut().unwrap();
+                            *input = Input::with_text(original);
+                            input.mode(InputMode::Normal);
+                            input.set_cursor(cursor);
+                            let mut clipboard = TestClipboard::default();
+                            for (text, unavailable) in
+                                [("猫", true), ("two\nlines", false), ("", false)]
+                            {
+                                clipboard.text = text.into();
+                                clipboard.unavailable = unavailable;
+                                let effect = app.event(key(binding));
+                                app.clipboard_effect(&mut clipboard, effect);
+                                assert_eq!(app.focused_input().unwrap().text(), original);
+                                assert_eq!(app.focused_input().unwrap().cursor(), cursor);
+                            }
+                            clipboard.text = "ö".into();
+                            let effect = app.event(Event::Key(KeyEvent::new(
+                                KeyCode::Char(binding),
+                                if paste_after {
+                                    KeyModifiers::NONE
+                                } else {
+                                    KeyModifiers::SHIFT
+                                },
+                            )));
+                            app.clipboard_effect(&mut clipboard, effect);
+                            let mut expected = original.to_owned();
+                            let position = cursor
+                                + if paste_after {
+                                    original[cursor..]
+                                        .graphemes(true)
+                                        .next()
+                                        .map_or(0, str::len)
+                                } else {
+                                    0
+                                };
+                            expected.insert_str(position, "ö");
+                            assert_eq!(app.focused_input().unwrap().text(), expected);
+                            app.event(key('u'));
+                            assert_eq!(app.focused_input().unwrap().text(), original);
+                            assert_eq!(app.focused_input().unwrap().cursor(), cursor);
+                            app.event(Event::Key(KeyEvent::new(
+                                KeyCode::Char('r'),
+                                KeyModifiers::CONTROL,
+                            )));
+                            assert_eq!(app.focused_input().unwrap().text(), expected);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn visual_d_and_x_cut_only_after_clipboard_success() {
         for key_char in ['d', 'x'] {
             for visual in [false, true] {
+                if key_char == 'd' && !visual {
+                    continue;
+                }
                 let mut app = App::new(None, None, Keybindings::default());
                 let original = "a e\u{301}👩‍💻z";
                 app.input.insert(original);
@@ -1959,7 +2433,7 @@ mod tests {
                     }
                 );
                 assert_eq!(app.input.text(), if visual { "a z" } else { "a 👩‍💻z" });
-                let effect = app.event(key('p'));
+                let effect = app.event(key('P'));
                 app.clipboard_effect(&mut clipboard, effect);
                 assert_eq!(app.input.text(), original);
                 app.input.set_cursor(app.input.text().len());
@@ -2043,11 +2517,11 @@ mod tests {
         };
         let effect = app.event(key('p'));
         app.clipboard_effect(&mut clipboard, effect);
-        assert_eq!(app.dialog.as_ref().unwrap().text.text(), "a猫b");
+        assert_eq!(app.dialog.as_ref().unwrap().text.text(), "ab猫");
         assert!(matches!(app.event(enter()), Effect::None));
         assert!(app.dialog.as_ref().unwrap().text.get_mode() == InputMode::Insert);
         assert!(matches!(app.event(enter()), Effect::Read { .. }));
-        assert_eq!(app.filter.text, "a猫b");
+        assert_eq!(app.filter.text, "ab猫");
     }
     #[test]
     fn pane_mode_stays_active_until_explicitly_closed() {

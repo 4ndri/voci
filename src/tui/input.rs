@@ -20,7 +20,7 @@ use unicode_width::UnicodeWidthStr;
 
 pub(super) enum InputEffect {
     None,
-    Paste,
+    Paste(PastePosition),
     CopySelection(String, SelectionAction),
 }
 
@@ -29,6 +29,13 @@ pub(super) enum SelectionAction {
     Yank,
     Cut,
     Change,
+    CutLine,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum PastePosition {
+    Before,
+    After,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -202,6 +209,16 @@ impl Input {
     pub(super) fn change_selection(&mut self) {
         self.cut_selection(EditorMode::Insert);
     }
+    pub(super) fn cut_line(&mut self) {
+        self.change(|state| {
+            let count = state.lines.to_string().chars().count();
+            state.cursor = Index2::new(0, 0);
+            state.mode = EditorMode::Insert;
+            state.execute(actions::DeleteCharForward(count));
+            state.mode = EditorMode::Normal;
+            state.selection = None;
+        });
+    }
     fn cut_selection(&mut self, mode: EditorMode) -> bool {
         if let Some(range) = self.selection().filter(|r| !r.is_empty()) {
             let text = self.text();
@@ -221,6 +238,9 @@ impl Input {
         }
     }
     pub(super) fn paste(&mut self, text: &str) -> Result<(), String> {
+        self.paste_at(text, PastePosition::Before)
+    }
+    pub(super) fn paste_at(&mut self, text: &str, position: PastePosition) -> Result<(), String> {
         if text.chars().any(char::is_control) {
             return Err("Paste must contain a single line without control characters.".into());
         }
@@ -228,7 +248,18 @@ impl Input {
         if !text.is_empty() {
             let original = self.text();
             let selection = self.selection();
+            let advance = if matches!(position, PastePosition::After)
+                && self.get_mode() == InputMode::Normal
+            {
+                original[self.cursor()..]
+                    .graphemes(true)
+                    .next()
+                    .map_or(0, |g| g.chars().count())
+            } else {
+                0
+            };
             self.change(|state| {
+                state.cursor.col += advance;
                 if let Some(range) = selection.filter(|r| !r.is_empty()) {
                     if let Some(selection) = &mut state.selection {
                         selection.start = Index2::new(0, original[..range.start].chars().count());
@@ -262,7 +293,14 @@ impl Input {
             Action::WordEnd => self.word_end(),
             Action::Home => self.set_cursor(0),
             Action::End => self.set_cursor(self.text().len()),
-            Action::Paste => return InputEffect::Paste,
+            Action::Paste => return InputEffect::Paste(PastePosition::After),
+            Action::PasteBefore => return InputEffect::Paste(PastePosition::Before),
+            Action::DeleteLine => {
+                let text = self.text();
+                if !text.is_empty() {
+                    return InputEffect::CopySelection(text, SelectionAction::CutLine);
+                }
+            }
             Action::Visual => self.mode(if self.get_mode() == InputMode::Visual {
                 InputMode::Normal
             } else {
