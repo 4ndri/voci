@@ -2,7 +2,7 @@
 use std::time::Instant;
 use voci::{
     domain::INITIAL_PAIRS,
-    provider::{DictionaryProvider, MicrosoftProvider},
+    lookup::{DictionaryProvider, providers::MicrosoftProvider},
 };
 
 #[tokio::test]

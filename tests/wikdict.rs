@@ -1,3 +1,4 @@
+use voci::lookup::{LookupError, LookupRequest};
 #[path = "support/commands.rs"]
 mod support;
 use predicates::prelude::*;
@@ -5,10 +6,10 @@ use rusqlite::{Connection, functions::FunctionFlags};
 use std::{path::Path, time::Duration};
 use unicode_normalization::UnicodeNormalization;
 use voci::{
-    app::LookupService,
     domain::*,
-    provider::DictionaryProvider,
-    wikdict::{RELEASE, WikDictProvider},
+    lookup::DictionaryProvider,
+    lookup::LookupService,
+    lookup::providers::{RELEASE, WikDictProvider},
 };
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -347,7 +348,7 @@ fn cli_defaults_to_keyless_wikdict_and_supports_provider_overrides() {
     assert_eq!(result.candidates[0].text, "liability");
     assert_eq!(
         result.attribution.as_deref(),
-        Some(voci::wikdict::ATTRIBUTION)
+        Some(voci::lookup::providers::ATTRIBUTION)
     );
     let output = support::command()
         .arg("--config")
@@ -483,8 +484,7 @@ async fn concurrent_first_runs_install_complete_dictionaries() {
 
 #[tokio::test]
 async fn coordinator_retries_failed_preparation_and_reuses_success_across_submissions() {
-    use std::sync::Arc;
-    use voci::{config::Config, coordinator::Coordinator};
+    use voci::{app::Coordinator, config::Config};
     let root = tempfile::tempdir().unwrap();
     installed(root.path());
     let reverse = root.path().join(RELEASE).join("en-de.sqlite3");
@@ -492,7 +492,7 @@ async fn coordinator_retries_failed_preparation_and_reuses_success_across_submis
     let mut config = Config::from_sources(None, None, None).unwrap();
     config.wikdict_data_dir = Some(root.path().into());
     let mut coordinator = Coordinator::new(None, None, Some(root.path().join("history.db")));
-    coordinator.config = Some(Arc::new(config));
+    coordinator = coordinator.with_config(config);
     let (_cancel, receiver) = tokio::sync::watch::channel(false);
     let request = LookupRequest {
         query: "Verbindlichkeit".into(),
@@ -503,7 +503,7 @@ async fn coordinator_retries_failed_preparation_and_reuses_success_across_submis
     assert!(!root.path().join("history.db").exists());
     assert!(matches!(
         coordinator
-            .run(request.clone(), receiver.clone(), None)
+            .record_lookup(request.clone(), receiver.clone(), None)
             .await
             .result,
         Err(LookupError::Dictionary(_))
@@ -512,7 +512,7 @@ async fn coordinator_retries_failed_preparation_and_reuses_success_across_submis
     fixture(&reverse, false);
     assert!(
         coordinator
-            .run(request.clone(), receiver.clone(), None)
+            .record_lookup(request.clone(), receiver.clone(), None)
             .await
             .result
             .is_ok()
@@ -522,14 +522,13 @@ async fn coordinator_retries_failed_preparation_and_reuses_success_across_submis
     assert!(
         coordinator
             .clone()
-            .run(request, receiver, None)
+            .record_lookup(request, receiver, None)
             .await
             .result
             .is_ok()
     );
     let entries = coordinator
-        .history
-        .as_ref()
+        .history()
         .unwrap()
         .page(Default::default(), None, 20, false)
         .await

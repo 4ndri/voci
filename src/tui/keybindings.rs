@@ -117,8 +117,8 @@ struct Profile {
     navigation: BTreeMap<String, Vec<String>>,
     actions: BTreeMap<String, Vec<String>>,
 }
-const QWERTY: &str = include_str!("../assets/keybindings/qwerty.keybinding.toml");
-const NEO: &str = include_str!("../assets/keybindings/neo-noted.keybinding.toml");
+const QWERTY: &str = include_str!("../../assets/keybindings/qwerty.keybinding.toml");
+const NEO: &str = include_str!("../../assets/keybindings/neo-noted.keybinding.toml");
 fn defaults() -> Vec<(&'static str, Action, Vec<&'static str>)> {
     vec![
         ("left", Action::Left, vec!["Left", "h"]),

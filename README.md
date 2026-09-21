@@ -39,6 +39,9 @@ Or use `cargo run --locked -- Verbindlichkeit` / `cargo run --locked -- shell` d
 
 ### Development and release tasks
 
+See [Rust conventions and review baseline](docs/rust-conventions.md) for code style,
+module responsibilities, and the checks expected for changes and reviews.
+
 The same tasks run locally and in GitHub Actions. They are also available directly as `cargo xtask <task>` when GitVersion is on `PATH` (or through `mise exec -- cargo xtask <task>`). Regular `cargo run`, `cargo build`, and `cargo test` still default to the `voci` application.
 
 | Command | Behavior |

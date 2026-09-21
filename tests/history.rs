@@ -1,14 +1,16 @@
+use caseless::Caseless;
+use unicode_normalization::UnicodeNormalization;
+use voci::lookup::{LookupError, LookupRequest};
 #[path = "support/commands.rs"]
 mod support;
 use predicates::prelude::*;
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
     time::{Duration, Instant},
 };
 use voci::{
+    app::Coordinator,
     config::{Config, ProviderName},
-    coordinator::Coordinator,
     domain::*,
     history::*,
 };
@@ -35,7 +37,7 @@ fn result(query: &str) -> LookupResult {
     LookupResult {
         query: query.into(),
         headword: query.into(),
-        normalized_headword: fold(query),
+        normalized_headword: query.nfd().default_case_fold().nfc().collect(),
         pair: INITIAL_PAIRS[0],
         candidates: (0..12)
             .map(|i| TranslationCandidate {
@@ -86,7 +88,7 @@ async fn nushell_completion_decodes_open_quotes_and_quoted_database_paths() {
     ] {
         let id = store.start(request(query), None).await.unwrap();
         store
-            .finish(id, Finished::from_result(&Ok(result(query))), None)
+            .finish(id, voci::app::history_outcome(&Ok(result(query))), None)
             .await
             .unwrap();
     }
@@ -160,7 +162,7 @@ async fn tab_completion_and_exact_cli_reuse_are_read_only_and_skip_provider_setu
     for query in ["Straße", "ice cream", "Straße"] {
         let id = store.start(request(query), None).await.unwrap();
         store
-            .finish(id, Finished::from_result(&Ok(result(query))), None)
+            .finish(id, voci::app::history_outcome(&Ok(result(query))), None)
             .await
             .unwrap();
     }
@@ -168,7 +170,7 @@ async fn tab_completion_and_exact_cli_reuse_are_read_only_and_skip_provider_setu
     store
         .finish(
             failed,
-            Finished::from_result(&Err(LookupError::Network)),
+            voci::app::history_outcome(&Err(LookupError::Network)),
             None,
         )
         .await
@@ -283,14 +285,18 @@ async fn lookup_suggestions_search_saved_successes_before_limiting_and_respect_l
     for query in ["Verbindlichkeit", "Verbindung"] {
         let id = store.start(request(query), None).await.unwrap();
         store
-            .finish(id, Finished::from_result(&Ok(result(query))), None)
+            .finish(id, voci::app::history_outcome(&Ok(result(query))), None)
             .await
             .unwrap();
     }
     for _ in 0..6 {
         let id = store.start(request("Verbindlichkeit"), None).await.unwrap();
         store
-            .finish(id, Finished::from_result(&Err(LookupError::Network)), None)
+            .finish(
+                id,
+                voci::app::history_outcome(&Err(LookupError::Network)),
+                None,
+            )
             .await
             .unwrap();
     }
@@ -365,7 +371,7 @@ async fn immutable_events_preserve_repeats_complete_results_and_unfinished_attem
     store
         .finish(
             first.clone(),
-            Finished::from_result(&Ok(result("Verbindlichkeit"))),
+            voci::app::history_outcome(&Ok(result("Verbindlichkeit"))),
             None,
         )
         .await
@@ -386,7 +392,7 @@ async fn immutable_events_preserve_repeats_complete_results_and_unfinished_attem
         store
             .finish(
                 first,
-                Finished::from_result(&Err(LookupError::Network)),
+                voci::app::history_outcome(&Err(LookupError::Network)),
                 None
             )
             .await
@@ -419,7 +425,7 @@ async fn literal_unicode_filters_apply_before_limit_and_keyset_pages_go_both_way
     for query in ["older", "Verbindlichkeit", "newer"] {
         let id = store.start(request(query), None).await.unwrap();
         store
-            .finish(id, Finished::from_result(&Ok(result(query))), None)
+            .finish(id, voci::app::history_outcome(&Ok(result(query))), None)
             .await
             .unwrap();
     }
@@ -496,7 +502,11 @@ async fn concurrent_writers_and_storage_failures_preserve_data() {
         tasks.spawn(async move {
             let id = store.start(request("repeat"), None).await?;
             store
-                .finish(id, Finished::from_result(&Err(LookupError::Network)), None)
+                .finish(
+                    id,
+                    voci::app::history_outcome(&Err(LookupError::Network)),
+                    None,
+                )
                 .await
         });
     }
@@ -546,15 +556,17 @@ async fn coordinator_records_setup_failures_and_cancellation_but_not_invalid_inp
         Some(ProviderName::Microsoft),
         Some(store.path().into()),
     );
-    coordinator.config = Some(Arc::new(config));
+    coordinator = coordinator.with_config(config);
     let (_tx, rx) = tokio::sync::watch::channel(false);
-    let bad = coordinator.run(request(""), rx.clone(), None).await;
+    let bad = coordinator
+        .record_lookup(request(""), rx.clone(), None)
+        .await;
     assert!(matches!(bad.result, Err(LookupError::InvalidInput(_))));
     assert!(!store.path().exists());
-    let failed = coordinator.run(request("word"), rx, None).await;
+    let failed = coordinator.record_lookup(request("word"), rx, None).await;
     assert!(matches!(failed.result, Err(LookupError::Configuration(_))));
     let (_tx, rx) = tokio::sync::watch::channel(true);
-    let cancelled = coordinator.run(request("word"), rx, None).await;
+    let cancelled = coordinator.record_lookup(request("word"), rx, None).await;
     assert!(matches!(cancelled.result, Err(LookupError::Cancelled)));
     let entries = store
         .page(HistoryFilter::default(), None, 20, false)
@@ -735,7 +747,7 @@ async fn cli_prints_all_candidates_and_searches_existing_events() {
     store
         .finish(
             id,
-            Finished::from_result(&Ok(result("Verbindlichkeit"))),
+            voci::app::history_outcome(&Ok(result("Verbindlichkeit"))),
             None,
         )
         .await
@@ -860,7 +872,11 @@ async fn equal_timestamps_use_event_order_and_terminal_outcomes_do_not_reorder_a
             .unwrap();
     }
     store
-        .finish(id, Finished::from_result(&Err(LookupError::Network)), None)
+        .finish(
+            id,
+            voci::app::history_outcome(&Err(LookupError::Network)),
+            None,
+        )
         .await
         .unwrap();
     let first = store
@@ -894,9 +910,9 @@ async fn lookup_failure_and_cancellation_remain_visible_when_storage_is_unavaila
     std::fs::write(&blocked, "not a directory").unwrap();
     let config = Config::from_sources(Some("provider='microsoft'"), None, None).unwrap();
     let mut coordinator = Coordinator::new(None, None, Some(blocked.join("voci.db")));
-    coordinator.config = Some(Arc::new(config));
+    coordinator = coordinator.with_config(config);
     let (_tx, rx) = tokio::sync::watch::channel(false);
-    let completion = coordinator.run(request("word"), rx, None).await;
+    let completion = coordinator.record_lookup(request("word"), rx, None).await;
     assert!(matches!(
         completion.result,
         Err(LookupError::Configuration(_))
@@ -915,7 +931,7 @@ async fn misses_preserve_resolved_pairs_and_legacy_outcomes_remain_readable() {
         to: None,
     };
     let id = store.start(request, None).await.unwrap();
-    let outcome = Finished::from_result(&Err(LookupError::NotFound {
+    let outcome = voci::app::history_outcome(&Err(LookupError::NotFound {
         query: "missing".into(),
         pair: INITIAL_PAIRS[0],
     }));
@@ -931,7 +947,8 @@ async fn misses_preserve_resolved_pairs_and_legacy_outcomes_remain_readable() {
     assert_eq!(page.entries[0].to, Some(Language::English));
     assert!(page.entries[0].result().is_none());
 
-    let mut legacy = serde_json::to_value(Finished::from_result(&Ok(result("legacy")))).unwrap();
+    let mut legacy =
+        serde_json::to_value(voci::app::history_outcome(&Ok(result("legacy")))).unwrap();
     legacy.as_object_mut().unwrap().remove("resolved_pair");
     let restored: Finished = serde_json::from_value(legacy).unwrap();
     assert_eq!(restored.resolved_pair, None);
@@ -975,10 +992,12 @@ async fn shell_settings_and_saved_history_do_not_require_valid_provider_settings
         let settings = voci::config::TuiConfig::load(Some(&path)).unwrap();
         assert_eq!(settings.keybindings, Some(PathBuf::from("custom.toml")));
         let coordinator = Coordinator::new(Some(path.clone()), None, None);
-        let store = coordinator.history.as_ref().unwrap();
+        let store = coordinator.history().unwrap();
         let id = store.start(request("saved encounter"), None).await.unwrap();
         let (_cancel, receiver) = tokio::sync::watch::channel(false);
-        let completion = coordinator.run(request("new lookup"), receiver, None).await;
+        let completion = coordinator
+            .record_lookup(request("new lookup"), receiver, None)
+            .await;
         assert!(matches!(
             completion.result,
             Err(LookupError::Configuration(_))
@@ -1008,7 +1027,7 @@ async fn cli_json_history_preserves_results_statuses_and_pagination() {
     store
         .finish(
             id,
-            Finished::from_result(&Ok(result("Verbindlichkeit"))),
+            voci::app::history_outcome(&Ok(result("Verbindlichkeit"))),
             None,
         )
         .await
@@ -1017,7 +1036,7 @@ async fn cli_json_history_preserves_results_statuses_and_pagination() {
     store
         .finish(
             failed,
-            Finished::from_result(&Err(LookupError::Network)),
+            voci::app::history_outcome(&Err(LookupError::Network)),
             None,
         )
         .await
@@ -1076,10 +1095,10 @@ fn history_tables_wrap_unicode_and_keep_outcomes_visible() {
         provider: Some("fixture".into()),
         started_at: 0,
         finished_at: Some(1),
-        finished: Some(Finished::from_result(&Ok(lookup))),
+        finished: Some(voci::app::history_outcome(&Ok(lookup))),
     };
     for width in [16, 32, 59, 60, 80, 100, 120] {
-        let rendered = voci::presentation::render_history_at_width(&entry, width);
+        let rendered = voci::cli::render_history_at_width(&entry, width);
         assert!(
             rendered.lines().all(|line| line.width() == width),
             "width {width}"
@@ -1089,15 +1108,13 @@ fn history_tables_wrap_unicode_and_keep_outcomes_visible() {
         assert!(rendered.contains("e\u{301}"));
         assert!(rendered.contains("Source:"));
     }
-    entry.finished = Some(Finished::from_result(&Err(LookupError::Network)));
-    let rendered = voci::presentation::render_history(&entry);
+    entry.finished = Some(voci::app::history_outcome(&Err(LookupError::Network)));
+    let rendered = voci::cli::render_history(&entry);
     assert!(rendered.contains("failed"));
     assert!(rendered.contains("Cannot connect"));
     entry.finished = None;
     entry.finished_at = None;
-    assert!(
-        voci::presentation::render_history(&entry).contains("unfinished · outcome not recorded")
-    );
+    assert!(voci::cli::render_history(&entry).contains("unfinished · outcome not recorded"));
 }
 
 #[test]

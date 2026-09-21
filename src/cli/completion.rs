@@ -1,5 +1,7 @@
 //! Shell adapters use this read-only endpoint; completing never prepares a provider.
-use crate::{domain::LookupRequest, history::HistoryStore, presentation::safe_text};
+
+use crate::lookup::LookupRequest;
+use crate::{history::HistoryStore, text::safe_text};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -8,11 +10,12 @@ pub enum Shell {
     #[value(alias = "nu")]
     Nushell,
 }
+
 impl Shell {
     pub fn script(self) -> &'static str {
         match self {
-            Self::Bash => include_str!("../assets/completions/voci.bash"),
-            Self::Nushell => include_str!("../assets/completions/voci.nu"),
+            Self::Bash => include_str!("../../assets/completions/voci.bash"),
+            Self::Nushell => include_str!("../../assets/completions/voci.nu"),
         }
     }
 }
@@ -36,6 +39,7 @@ fn matching(values: &[&str], prefix: &str) -> Vec<String> {
         .map(|value| (*value).into())
         .collect()
 }
+
 fn paths(prefix: &str) -> Vec<String> {
     let split = prefix.rfind(std::path::is_separator).map_or(0, |i| i + 1);
     let (base, name) = prefix.split_at(split);

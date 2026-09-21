@@ -1,49 +1,15 @@
-use std::{collections::HashSet, future::Future, time::Duration};
+//! Microsoft Dictionary Lookup HTTP adapter.
 
+use crate::lookup::validate_query;
+
+use crate::domain::{INITIAL_PAIRS, LanguagePair, LookupResult, ResultKind, TranslationCandidate};
+use crate::lookup::{DictionaryProvider, LookupError, ProviderCapabilities};
 use reqwest::{
     Client, StatusCode, Url,
     header::{HeaderMap, HeaderValue},
 };
 use serde::Deserialize;
-
-use crate::domain::*;
-use crate::wikdict::WikDictProvider;
-
-/// Static dispatch keeps provider selection small without introducing a plugin registry.
-pub enum Provider {
-    WikDict(WikDictProvider),
-    Microsoft(MicrosoftProvider),
-}
-
-impl DictionaryProvider for Provider {
-    fn capabilities(&self) -> ProviderCapabilities {
-        match self {
-            Self::WikDict(provider) => provider.capabilities(),
-            Self::Microsoft(provider) => provider.capabilities(),
-        }
-    }
-
-    async fn lookup(&self, query: &str, pair: LanguagePair) -> Result<LookupResult, LookupError> {
-        match self {
-            Self::WikDict(provider) => provider.lookup(query, pair).await,
-            Self::Microsoft(provider) => provider.lookup(query, pair).await,
-        }
-    }
-}
-
-pub struct ProviderCapabilities {
-    pub dictionary_pairs: Vec<LanguagePair>,
-    pub translation_pairs: Vec<LanguagePair>,
-}
-
-pub trait DictionaryProvider: Send + Sync {
-    fn capabilities(&self) -> ProviderCapabilities;
-    fn lookup(
-        &self,
-        query: &str,
-        pair: LanguagePair,
-    ) -> impl Future<Output = Result<LookupResult, LookupError>> + Send;
-}
+use std::{collections::HashSet, time::Duration};
 
 pub struct MicrosoftProvider {
     client: Client,

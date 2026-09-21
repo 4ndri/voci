@@ -1,5 +1,6 @@
-use crate::domain::{Language, LookupError};
-use clap::ValueEnum;
+//! Configuration loading without provider construction or frontend dependencies.
+
+use crate::domain::Language;
 use directories::ProjectDirs;
 use serde::Deserialize;
 use std::{
@@ -28,7 +29,7 @@ struct HistoryConfig {
 pub fn history_path(
     config: Option<&Path>,
     database: Option<&Path>,
-) -> Result<PathBuf, LookupError> {
+) -> Result<PathBuf, ConfigError> {
     if let Some(path) = database {
         return checked_database_path(path.to_owned());
     }
@@ -42,11 +43,11 @@ pub fn history_path(
         .map(Ok)
         .unwrap_or_else(default_path)?;
     let settings: HistoryOnly = match fs::read_to_string(&path) {
-        Ok(text) => toml::from_str(&text).map_err(|_| LookupError::Configuration(
+        Ok(text) => toml::from_str(&text).map_err(|_| ConfigError(
             "Cannot read history settings from config.toml. Expected [history].database as a path; use --database PATH to override.".into()
         ))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && config.is_none() => HistoryOnly::default(),
-        Err(_) => return Err(LookupError::Configuration(format!(
+        Err(_) => return Err(ConfigError(format!(
             "Cannot read {}. Check the path and file permissions, or use --database PATH.", path.display()
         ))),
     };
@@ -60,14 +61,12 @@ pub fn history_path(
                 .join(database)
         });
     }
-    crate::history::default_path().map_err(LookupError::Configuration)
+    crate::history::default_path().map_err(ConfigError)
 }
 
-fn checked_database_path(path: PathBuf) -> Result<PathBuf, LookupError> {
+fn checked_database_path(path: PathBuf) -> Result<PathBuf, ConfigError> {
     if path.as_os_str().is_empty() {
-        return Err(LookupError::Configuration(
-            "History database path cannot be empty.".into(),
-        ));
+        return Err(ConfigError("History database path cannot be empty.".into()));
     }
     Ok(path)
 }
@@ -80,7 +79,7 @@ pub struct TuiConfig {
 
 impl TuiConfig {
     /// Shell startup must not depend on valid lookup-provider settings.
-    pub fn load(explicit: Option<&Path>) -> Result<Self, LookupError> {
+    pub fn load(explicit: Option<&Path>) -> Result<Self, ConfigError> {
         #[derive(Default, Deserialize)]
         #[serde(default)]
         struct TuiOnly {
@@ -88,7 +87,7 @@ impl TuiConfig {
         }
         let settings: TuiOnly = match read_config(explicit)? {
             Some(content) => toml::from_str(&content).map_err(|_| {
-                LookupError::Configuration(
+                ConfigError(
                     "Cannot read TUI settings from config.toml. Expected [tui].keybindings as a path.".into(),
                 )
             })?,
@@ -98,7 +97,7 @@ impl TuiConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderName {
     #[default]
@@ -128,7 +127,7 @@ pub struct Config {
     pub keybindings: Option<PathBuf>,
 }
 
-pub fn default_path() -> Result<PathBuf, LookupError> {
+pub fn default_path() -> Result<PathBuf, ConfigError> {
     #[cfg(windows)]
     if let Some(path) = std::env::var_os("APPDATA")
         .map(PathBuf::from)
@@ -140,13 +139,11 @@ pub fn default_path() -> Result<PathBuf, LookupError> {
     ProjectDirs::from("", "", "voci")
         .map(|dirs| dirs.config_dir().join("config.toml"))
         .ok_or_else(|| {
-            LookupError::Configuration(
-                "Cannot find your user configuration directory; use --config PATH.".into(),
-            )
+            ConfigError("Cannot find your user configuration directory; use --config PATH.".into())
         })
 }
 
-fn read_config(explicit: Option<&Path>) -> Result<Option<String>, LookupError> {
+fn read_config(explicit: Option<&Path>) -> Result<Option<String>, ConfigError> {
     let path = explicit
         .map(Path::to_owned)
         .map(Ok)
@@ -156,7 +153,7 @@ fn read_config(explicit: Option<&Path>) -> Result<Option<String>, LookupError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && explicit.is_none() => {
             Ok(None)
         }
-        Err(_) => Err(LookupError::Configuration(format!(
+        Err(_) => Err(ConfigError(format!(
             "Cannot read {}. Check the path and file permissions.",
             path.display()
         ))),
@@ -164,33 +161,21 @@ fn read_config(explicit: Option<&Path>) -> Result<Option<String>, LookupError> {
 }
 
 impl Config {
-    pub fn wikdict_dir(&self) -> Result<PathBuf, LookupError> {
+    pub fn wikdict_dir(&self) -> Result<PathBuf, ConfigError> {
         if let Some(path) = &self.wikdict_data_dir {
             return Ok(path.clone());
         }
         ProjectDirs::from("", "", "voci")
             .map(|dirs| dirs.data_local_dir().join("wikdict"))
             .ok_or_else(|| {
-                LookupError::Configuration(
+                ConfigError(
                     "Cannot find a dictionary directory; set [wikdict].data_dir in config.toml."
                         .into(),
                 )
             })
     }
 
-    pub fn microsoft(&self) -> Result<crate::provider::MicrosoftProvider, LookupError> {
-        let key = self.key.as_deref().ok_or_else(|| LookupError::Configuration("Set VOCI_MICROSOFT_KEY to use Microsoft, or select --provider wikdict for lookup without a key.".into()))?;
-        if self.region.as_ref().is_some_and(|value| {
-            value.is_empty() || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-        }) {
-            return Err(LookupError::Configuration(
-                "Microsoft region must be a nonempty Azure region name such as 'westeurope'."
-                    .into(),
-            ));
-        }
-        crate::provider::MicrosoftProvider::new(key, self.region.as_deref())
-    }
-    pub fn load(explicit: Option<&Path>) -> Result<Self, LookupError> {
+    pub fn load(explicit: Option<&Path>) -> Result<Self, ConfigError> {
         let content = read_config(explicit)?;
         Self::from_sources(
             content.as_deref(),
@@ -203,10 +188,10 @@ impl Config {
         content: Option<&str>,
         key: Option<String>,
         region_override: Option<String>,
-    ) -> Result<Self, LookupError> {
+    ) -> Result<Self, ConfigError> {
         let file: FileConfig = match content {
             // Don't echo the parser's source snippet: the file could contain a misplaced secret.
-            Some(content) => toml::from_str(content).map_err(|_| LookupError::Configuration("Invalid config.toml. Expected provider, target_language, optional [wikdict].data_dir, [microsoft].region, [history].database and [tui].keybindings; keys belong only in VOCI_MICROSOFT_KEY.".into()))?,
+            Some(content) => toml::from_str(content).map_err(|_| ConfigError("Invalid config.toml. Expected provider, target_language, optional [wikdict].data_dir, [microsoft].region, [history].database and [tui].keybindings; keys belong only in VOCI_MICROSOFT_KEY.".into()))?,
             None => FileConfig::default(),
         };
         let target_language = file
@@ -214,9 +199,7 @@ impl Config {
             .as_deref()
             .unwrap_or("en")
             .parse()
-            .map_err(|_| {
-                LookupError::Configuration("target_language must be 'de' or 'en'.".into())
-            })?;
+            .map_err(|_| ConfigError("target_language must be 'de' or 'en'.".into()))?;
         let key = key.filter(|key| !key.trim().is_empty());
         let region = region_override.or(file.microsoft.region);
         if let Some(path) = file.history.database {
@@ -232,6 +215,10 @@ impl Config {
         })
     }
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("Configuration error: {0}")]
+pub struct ConfigError(pub String);
 
 #[cfg(test)]
 mod tests {
@@ -268,12 +255,5 @@ mod tests {
         let config = Config::from_sources(None, None, None).unwrap();
         assert_eq!(config.provider, ProviderName::Wikdict);
         assert!(config.key.is_none());
-        assert!(config.microsoft().is_err());
-        assert!(
-            Config::from_sources(None, Some("".into()), None)
-                .unwrap()
-                .microsoft()
-                .is_err()
-        );
     }
 }

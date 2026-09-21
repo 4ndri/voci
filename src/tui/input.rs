@@ -2,7 +2,7 @@
 //! The application resolves configurable keys and performs fallible clipboard I/O.
 //! edtui owns the buffer, modes, selections and editing actions. Its scalar offsets
 //! are adapted to graphemes so combining accents and emoji remain indivisible.
-use crate::{keybindings::Action, presentation::safe_text};
+use crate::{text::safe_text, tui::keybindings::Action};
 use crossterm::{
     cursor::SetCursorStyle,
     event::{KeyCode, KeyEvent, KeyModifiers},
@@ -45,6 +45,7 @@ pub(super) enum InputMode {
     Insert,
     Visual,
 }
+
 impl InputMode {
     pub(super) fn cursor_style(self) -> SetCursorStyle {
         match self {
@@ -52,6 +53,7 @@ impl InputMode {
             Self::Normal | Self::Visual => SetCursorStyle::SteadyBlock,
         }
     }
+
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Normal => "NORMAL",
@@ -60,12 +62,14 @@ impl InputMode {
         }
     }
 }
+
 pub(super) struct Input {
     state: EditorState,
     insert_group: bool,
     undo_available: usize,
     redo_available: usize,
 }
+
 impl Default for Input {
     fn default() -> Self {
         let mut state = EditorState::default();
@@ -79,6 +83,7 @@ impl Default for Input {
         }
     }
 }
+
 impl Input {
     pub(super) fn with_text(text: &str) -> Self {
         let mut input = Self::default();
@@ -87,6 +92,7 @@ impl Input {
         input.set_cursor(text.len());
         input
     }
+
     // Execute a whole edit on a working buffer. edtui's individual deletion
     // actions capture their own checkpoints; discard those intermediate snapshots
     // and capture just one application-level change in the persistent editor.
@@ -115,6 +121,7 @@ impl Input {
         self.state.selection = working.selection;
         self.align_cursor();
     }
+
     fn restore_change(&mut self, redo: bool) {
         if redo && self.redo_available > 0 {
             self.state.execute(actions::Redo);
@@ -125,12 +132,14 @@ impl Input {
             self.undo_available -= 1;
             self.redo_available += 1;
         }
-        self.mode(InputMode::Normal);
+        self.set_mode(InputMode::Normal);
         self.align_cursor();
     }
+
     pub(super) fn text(&self) -> String {
         self.state.lines.to_string()
     }
+
     pub(super) fn cursor(&self) -> usize {
         self.text()
             .chars()
@@ -138,14 +147,16 @@ impl Input {
             .map(char::len_utf8)
             .sum()
     }
-    pub(super) fn get_mode(&self) -> InputMode {
+
+    pub(super) fn mode(&self) -> InputMode {
         match self.state.mode {
             EditorMode::Insert => InputMode::Insert,
             EditorMode::Visual => InputMode::Visual,
             _ => InputMode::Normal,
         }
     }
-    pub(super) fn mode(&mut self, mode: InputMode) {
+
+    pub(super) fn set_mode(&mut self, mode: InputMode) {
         // Voci keeps the insertion position on Escape, including the end gap.
         let cursor = self.state.cursor;
         if mode != InputMode::Insert {
@@ -170,6 +181,7 @@ impl Input {
             self.state.selection = None;
         }
     }
+
     pub(super) fn set_cursor(&mut self, byte: usize) {
         let text = self.text();
         let byte = text
@@ -183,9 +195,11 @@ impl Input {
             selection.end = self.state.cursor;
         }
     }
+
     fn align_cursor(&mut self) {
         self.set_cursor(self.cursor());
     }
+
     pub(super) fn selection(&self) -> Option<std::ops::Range<usize>> {
         let selection = self.state.selection.as_ref()?;
         let text = self.text();
@@ -201,14 +215,17 @@ impl Input {
             .sum();
         Some(start..end + text[end..].graphemes(true).next().map_or(0, str::len))
     }
+
     pub(super) fn cut(&mut self) {
         if !self.cut_selection(EditorMode::Normal) {
             self.delete();
         }
     }
+
     pub(super) fn change_selection(&mut self) {
         self.cut_selection(EditorMode::Insert);
     }
+
     pub(super) fn cut_line(&mut self) {
         self.change(|state| {
             let count = state.lines.to_string().chars().count();
@@ -219,6 +236,7 @@ impl Input {
             state.selection = None;
         });
     }
+
     fn cut_selection(&mut self, mode: EditorMode) -> bool {
         if let Some(range) = self.selection().filter(|r| !r.is_empty()) {
             let text = self.text();
@@ -237,9 +255,11 @@ impl Input {
             false
         }
     }
+
     pub(super) fn paste(&mut self, text: &str) -> Result<(), String> {
         self.paste_at(text, PastePosition::Before)
     }
+
     pub(super) fn paste_at(&mut self, text: &str, position: PastePosition) -> Result<(), String> {
         if text.chars().any(char::is_control) {
             return Err("Paste must contain a single line without control characters.".into());
@@ -248,16 +268,15 @@ impl Input {
         if !text.is_empty() {
             let original = self.text();
             let selection = self.selection();
-            let advance = if matches!(position, PastePosition::After)
-                && self.get_mode() == InputMode::Normal
-            {
-                original[self.cursor()..]
-                    .graphemes(true)
-                    .next()
-                    .map_or(0, |g| g.chars().count())
-            } else {
-                0
-            };
+            let advance =
+                if matches!(position, PastePosition::After) && self.mode() == InputMode::Normal {
+                    original[self.cursor()..]
+                        .graphemes(true)
+                        .next()
+                        .map_or(0, |g| g.chars().count())
+                } else {
+                    0
+                };
             self.change(|state| {
                 state.cursor.col += advance;
                 if let Some(range) = selection.filter(|r| !r.is_empty()) {
@@ -278,12 +297,13 @@ impl Input {
         }
         Ok(())
     }
+
     pub(super) fn action(&mut self, action: Action) -> InputEffect {
         match action {
-            Action::Edit | Action::Submit => self.mode(InputMode::Insert),
+            Action::Edit | Action::Submit => self.set_mode(InputMode::Insert),
             Action::Append => {
                 self.right();
-                self.mode(InputMode::Insert);
+                self.set_mode(InputMode::Insert);
             }
             Action::Undo => self.restore_change(false),
             Action::Redo => self.restore_change(true),
@@ -301,7 +321,7 @@ impl Input {
                     return InputEffect::CopySelection(text, SelectionAction::CutLine);
                 }
             }
-            Action::Visual => self.mode(if self.get_mode() == InputMode::Visual {
+            Action::Visual => self.set_mode(if self.mode() == InputMode::Visual {
                 InputMode::Normal
             } else {
                 InputMode::Visual
@@ -329,6 +349,7 @@ impl Input {
         }
         InputEffect::None
     }
+
     pub(super) fn insert(&mut self, text: &str) {
         self.change(|state| {
             for c in safe_text(text).chars().filter(|c| !c.is_control()) {
@@ -336,6 +357,7 @@ impl Input {
             }
         });
     }
+
     // Execute with insert bounds to preserve Voci's end-gap cursor in every mode.
     fn at_insertion_bounds(&mut self, action: impl Execute) {
         let mode = self.state.mode;
@@ -344,6 +366,7 @@ impl Input {
         self.state.mode = mode;
         self.align_cursor();
     }
+
     pub(super) fn left(&mut self) {
         let count = self.text()[..self.cursor()]
             .graphemes(true)
@@ -351,6 +374,7 @@ impl Input {
             .map_or(0, |g| g.chars().count());
         self.at_insertion_bounds(actions::MoveBackward(count));
     }
+
     pub(super) fn right(&mut self) {
         let count = self.text()[self.cursor()..]
             .graphemes(true)
@@ -358,6 +382,7 @@ impl Input {
             .map_or(0, |g| g.chars().count());
         self.at_insertion_bounds(actions::MoveForward(count));
     }
+
     pub(super) fn backspace(&mut self) {
         let count = self.text()[..self.cursor()]
             .graphemes(true)
@@ -367,6 +392,7 @@ impl Input {
             state.execute(actions::DeleteChar(count));
         });
     }
+
     pub(super) fn delete(&mut self) {
         let count = self.text()[self.cursor()..]
             .graphemes(true)
@@ -379,6 +405,7 @@ impl Input {
             state.mode = mode;
         });
     }
+
     // Run edtui's word motions on one scalar per grapheme. This preserves its
     // word/punctuation rules without treating combining marks as punctuation.
     fn word_motion(&mut self, end: bool) {
@@ -405,7 +432,7 @@ impl Input {
                 self.set_cursor(text.len());
                 return;
             }
-            let insertion = self.get_mode() == InputMode::Insert;
+            let insertion = self.mode() == InputMode::Insert;
             let at_end = classes.as_bytes().get(cursor) != Some(&b' ')
                 && classes.as_bytes().get(cursor) != classes.as_bytes().get(cursor + 1);
             if !insertion
@@ -431,12 +458,15 @@ impl Input {
                 .map_or(text.len(), |(i, _)| *i),
         );
     }
+
     pub(super) fn word_begin(&mut self) {
         self.word_motion(false);
     }
+
     pub(super) fn word_end(&mut self) {
         self.word_motion(true);
     }
+
     pub(super) fn edit(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Left if key.modifiers == KeyModifiers::CONTROL => self.word_begin(),
@@ -458,6 +488,7 @@ impl Input {
             _ => {}
         }
     }
+
     // edtui 0.11's viewport counts scalar widths (e.g. each half of a ZWJ emoji).
     // Keep this small grapheme viewport until upstream supports grapheme scrolling.
     pub(super) fn visible(&self, width: usize) -> (Line<'static>, u16) {
@@ -493,6 +524,7 @@ impl Input {
         (Line::from(visible), column)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,7 +535,7 @@ mod tests {
         input.insert("e\u{301}猫");
         input.backspace();
         input.insert("👩‍💻");
-        input.mode(InputMode::Normal);
+        input.set_mode(InputMode::Normal);
         input.action(Action::Undo);
         assert_eq!(input.text(), "");
         assert_eq!(input.cursor(), 0);
@@ -513,8 +545,8 @@ mod tests {
         input.paste("old").unwrap();
         input.action(Action::Undo);
         // Motion, mode changes, failed paste and a no-op delete retain redo.
-        input.mode(InputMode::Insert);
-        input.mode(InputMode::Normal);
+        input.set_mode(InputMode::Insert);
+        input.set_mode(InputMode::Normal);
         input.delete();
         assert!(input.paste("bad\npaste").is_err());
         input.action(Action::Redo);
@@ -535,9 +567,9 @@ mod tests {
     #[test]
     fn undo_restores_cuts_and_visual_replacements_atomically() {
         let mut input = Input::with_text("a e\u{301}👩‍💻z");
-        input.mode(InputMode::Normal);
+        input.set_mode(InputMode::Normal);
         input.set_cursor(2);
-        input.mode(InputMode::Visual);
+        input.set_mode(InputMode::Visual);
         input.right();
         input.paste("猫").unwrap();
         assert_eq!(input.text(), "a 猫z");
@@ -553,7 +585,7 @@ mod tests {
         assert_eq!(input.text(), "a 猫z");
         assert_eq!(input.cursor(), 2);
         let mut input = Input::with_text("🇨a🇭");
-        input.mode(InputMode::Normal);
+        input.set_mode(InputMode::Normal);
         input.set_cursor("🇨".len());
         input.cut();
         input.action(Action::Undo);
@@ -567,7 +599,7 @@ mod tests {
     #[test]
     fn undo_history_stays_bounded_and_filters_start_with_a_clean_baseline() {
         let mut input = Input::with_text("filter");
-        input.mode(InputMode::Normal);
+        input.set_mode(InputMode::Normal);
         input.action(Action::Undo);
         assert_eq!(input.text(), "filter");
         for _ in 0..120 {
@@ -587,7 +619,7 @@ mod tests {
     fn word_motions_handle_punctuation_unicode_and_edges() {
         let mut input = Input::default();
         input.insert("  Grüße_2,  e\u{301}lan 👩‍💻猫  ");
-        input.mode(InputMode::Normal);
+        input.set_mode(InputMode::Normal);
         input.set_cursor(0);
         for expected in ["2,", ",", "n 👩", "👩", "猫"] {
             input.word_end();
@@ -606,7 +638,7 @@ mod tests {
             let mut input = Input::default();
             input.insert(text);
             for mode in [InputMode::Normal, InputMode::Visual, InputMode::Insert] {
-                input.mode(mode);
+                input.set_mode(mode);
                 for _ in 0..3 {
                     input.word_begin();
                     input.word_end();
@@ -626,7 +658,7 @@ mod tests {
     fn cuts_that_join_graphemes_leave_a_valid_cursor_boundary() {
         let mut input = Input::default();
         input.insert("🇨a🇭");
-        input.mode(InputMode::Normal);
+        input.set_mode(InputMode::Normal);
         input.set_cursor("🇨".len());
         input.cut();
         assert_eq!(input.text(), "🇨🇭");

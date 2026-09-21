@@ -1,7 +1,9 @@
 //! Local WikDict SQLite dictionaries. No queries or credentials are sent to WikDict.
+
+use crate::lookup::{LookupError, validate_query};
 use crate::{
-    domain::*,
-    provider::{DictionaryProvider, ProviderCapabilities},
+    domain::{INITIAL_PAIRS, LanguagePair, LookupResult, ResultKind, TranslationCandidate},
+    lookup::{DictionaryProvider, ProviderCapabilities},
 };
 use caseless::Caseless;
 use reqwest::Client;
