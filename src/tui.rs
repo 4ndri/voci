@@ -2380,7 +2380,7 @@ mod tests {
                                 } else {
                                     0
                                 };
-                            expected.insert_str(position, "ö");
+                            expected.insert(position, 'ö');
                             assert_eq!(app.focused_input().unwrap().text(), expected);
                             app.event(key('u'));
                             assert_eq!(app.focused_input().unwrap().text(), original);
