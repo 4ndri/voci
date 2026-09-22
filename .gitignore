@@ -1,3 +1,4 @@
 /target/
 /dist/
+/.reviews/
 __pycache__/
