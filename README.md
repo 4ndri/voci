@@ -12,6 +12,13 @@ voci shell
 
 The CLI prints a word, its language direction, and up to eight translation candidates. The TUI keeps the same lookup loop open for repeated searches. Every valid lookup attempt is saved locally, including repeats, misses, failures, and cancellations. Browse saved encounters from either interface; flashcard practice remains a future feature.
 
+## License
+
+voci is licensed under the [MIT License](LICENSE).
+
+Dictionary data is licensed separately under CC BY-SA 4.0; see
+[dictionary attribution](docs/pitches/lookup/wikdict-attribution.md).
+
 ## Install
 
 Download the archive for your operating system and CPU from [GitHub Releases](https://github.com/4ndri/voci/releases). Extract it and put `voci` (or `voci.exe` on Windows) in a directory on your `PATH`. One executable provides both the CLI and `voci shell`; Rust is not needed to run it. Release archives include documentation, and `SHA256SUMS` provides checksums for each download.
