@@ -1,0 +1,27 @@
+# Voci keybinding profile. Unspecified actions retain shared defaults.
+# Arrays contain alternative bindings for the same action.
+# "gg" is a two-key sequence; "G" is an uppercase character.
+# Navigation letters do not act as shortcuts while editing text.
+# Other actions retain the shared defaults described in the pitch.
+
+[navigation]
+left = ["Left", "h"]
+right = ["Right", "l"]
+up = ["Up", "k"]
+down = ["Down", "j"]
+home = ["Home", "gg"]
+end = ["End", "G"]
+
+# Input actions apply in normal/visual modes; letters are text in insert mode.
+[actions]
+undo = ["u"] # Normal input only.
+redo = ["Ctrl-r"] # Normal input; Ctrl-r still refreshes the history list.
+append = ["a"] # Normal input: enter insert mode after the current character.
+pane_prefix = ["Ctrl-w"] # Toggle persistent pane selection; Esc also exits.
+paste = ["p"]
+visual = ["v"]
+change_selection = ["c"] # Visual: cut selection and enter insert mode.
+yank_selection = ["y"]
+delete_selection = ["d", "x"]
+word_begin = ["Ctrl-Left", "b"]
+word_end = ["Ctrl-Right", "e"]

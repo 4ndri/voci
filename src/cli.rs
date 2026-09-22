@@ -1,97 +1,107 @@
-use crate::config::ProviderName;
-use crate::domain::{Language, LanguagePair, LookupError, LookupRequest, validate_query};
-use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+//! Command dispatch and terminal frontend startup.
 
-#[derive(Debug, Parser)]
-#[command(
-    version = option_env!("VOCI_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")),
-    about = "Quick German ↔ English dictionary lookup",
-    disable_help_subcommand = true,
-    args_conflicts_with_subcommands = true
-)]
-pub struct Cli {
-    /// Word to look up (use -- shell for the literal word "shell")
-    #[arg(value_name = "WORD")]
-    pub word: Option<String>,
-    #[command(subcommand)]
-    pub command: Option<Command>,
-    /// Source language: de or en (default: automatic dictionary evidence)
-    #[arg(long, global = true, value_name = "LANG")]
-    pub from: Option<Language>,
-    /// Target language: de or en (default: configured preference)
-    #[arg(long, global = true, value_name = "LANG")]
-    pub to: Option<Language>,
-    /// Read a specific TOML configuration file
-    #[arg(long, global = true, value_name = "PATH")]
-    pub config: Option<PathBuf>,
-    /// Dictionary source (default: wikdict, or the configured provider)
-    #[arg(long, global = true, value_enum)]
-    pub provider: Option<ProviderName>,
-}
+mod args;
+mod completion;
+mod history;
+mod lookup;
+mod output;
 
-#[derive(Debug, Subcommand)]
-pub enum Command {
-    /// Open the interactive lookup TUI
-    Shell,
-}
+use args::{Cli, Command};
+pub use output::{render_history, render_history_at_width, render_result};
 
-impl Cli {
-    pub fn validate(&self) -> Result<(), LookupError> {
-        if let (Some(from), Some(to)) = (self.from, self.to)
-            && from == to
+use crate::{
+    app::Coordinator,
+    config::TuiConfig,
+    presentation::lookup_error_text,
+    text::safe_text,
+    tui::{self, Keybindings},
+};
+use clap::{CommandFactory, Parser};
+use output::{exit_code, fail, output, output_json};
+use std::{process::ExitCode, sync::Arc};
+
+pub async fn run() -> ExitCode {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let code = error.exit_code() as u8;
+            if code == 0 {
+                let _ = error.print();
+            } else {
+                eprintln!(
+                    "{}",
+                    error
+                        .to_string()
+                        .lines()
+                        .map(safe_text)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
+            }
+            return ExitCode::from(code);
+        }
+    };
+    let fail = |code, message: &str| fail(cli.json, code, message);
+    if cli.fresh && cli.word.is_none() {
+        return fail(2, "--fresh requires a lookup word.");
+    }
+    if cli.word.is_none() && cli.command.is_none() {
+        let _ = Cli::command().print_help();
+        println!();
+        return ExitCode::SUCCESS;
+    }
+    if cli.word.is_some() && cli.command.is_some() {
+        return fail(2, "A lookup word cannot be combined with a subcommand.");
+    }
+    if let Some(Command::Completions { shell }) = &cli.command {
+        return output(shell.script());
+    }
+    if let Some(Command::Complete { words }) = &cli.command {
+        let values = crate::cli::completion::complete(words).await;
+        return if cli.json {
+            output_json(&values)
+        } else {
+            output(&values.join("\n"))
+        };
+    }
+    if let Some(Command::History(options) | Command::Search { options, .. }) = &cli.command {
+        return history::run(&cli, options).await;
+    }
+    if let Err(error) = cli.validate() {
+        return fail(exit_code(&error), &lookup_error_text(&error));
+    }
+    let coordinator = Coordinator::new(
+        cli.config.clone(),
+        cli.provider.map(Into::into),
+        cli.database.clone(),
+    );
+    if let Some(request) = cli.request() {
+        lookup::run(&cli, &coordinator, request).await
+    } else {
+        if let Err(e) = tui::check_terminal() {
+            return fail(1, &e.to_string());
+        }
+        let config = match TuiConfig::load(cli.config.as_deref()) {
+            Ok(config) => config,
+            Err(e) => return fail(1, &e.to_string()),
+        };
+        let config_path = match cli
+            .config
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(crate::config::default_path)
         {
-            return Err(LookupError::UnsupportedPair(LanguagePair { from, to }));
+            Ok(path) => path,
+            Err(e) => return fail(1, &e.to_string()),
+        };
+        let (bindings, warnings) =
+            match Keybindings::load(&config_path, config.keybindings.as_deref()) {
+                Ok(v) => v,
+                Err(e) => return fail(1, &e),
+            };
+        match tui::run(Arc::new(coordinator), cli.from, cli.to, bindings, warnings).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(1, &e.to_string()),
         }
-        if let Some(query) = &self.word {
-            validate_query(query)?;
-        }
-        Ok(())
-    }
-
-    pub fn request(&self) -> Option<LookupRequest> {
-        self.word.as_ref().map(|query| LookupRequest {
-            query: query.clone(),
-            from: self.from,
-            to: self.to,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn entry_points_and_literal_shell() {
-        assert!(matches!(
-            Cli::try_parse_from(["voci", "shell"]).unwrap().command,
-            Some(Command::Shell)
-        ));
-        let literal = Cli::try_parse_from(["voci", "--", "shell"]).unwrap();
-        assert_eq!(literal.word.as_deref(), Some("shell"));
-        assert!(literal.command.is_none());
-        assert_eq!(
-            Cli::try_parse_from(["voci", "Verbindlichkeit"])
-                .unwrap()
-                .word
-                .as_deref(),
-            Some("Verbindlichkeit")
-        );
-        assert_eq!(
-            Cli::try_parse_from(["voci", "shell", "--from", "de"])
-                .unwrap()
-                .from,
-            Some(Language::German)
-        );
-        assert_eq!(
-            Cli::try_parse_from(["voci", "--to", "en", "shell"])
-                .unwrap()
-                .to,
-            Some(Language::English)
-        );
-        assert!(Cli::try_parse_from(["voci", "word", "another"]).is_err());
-        assert!(Cli::try_parse_from(["voci", "shell", "word"]).is_err());
-        assert!(Cli::try_parse_from(["voci", "--to", "fr", "word"]).is_err());
     }
 }

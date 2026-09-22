@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+#MISE description="Set up Tab completion for all supported shells (or --shell bash/nushell)"
+#MISE raw_args=true
+
+set -euo pipefail
+
+exec "$(dirname "${BASH_SOURCE[0]}")/../../scripts/xtask" setup:completions "$@"

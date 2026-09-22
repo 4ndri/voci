@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#MISE description="Install or update the voci CLI and TUI for the current user"
+#MISE description="Install or update voci and set up shell completions for the current user"
 #MISE raw_args=true
 
 set -euo pipefail

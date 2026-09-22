@@ -1,75 +1,89 @@
-use crate::domain::LookupResult;
-use unicode_segmentation::UnicodeSegmentation;
+//! Pure formatting shared by terminal frontends and recorded diagnostics.
 
-pub const CANDIDATE_LIMIT: usize = 8;
+use crate::{domain::LookupResult, text::safe_text};
+use chrono::{DateTime, Local};
 
-/// Prevent escape sequences, line injection, and bidi overrides in terminal output.
-pub fn safe_text(text: &str) -> String {
-    text.chars().filter(|c| !c.is_control() && !matches!(*c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')).collect()
+pub fn display_time(timestamp: i64) -> String {
+    DateTime::from_timestamp_micros(timestamp)
+        .map(|t| {
+            t.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
+                .to_string()
+        })
+        .unwrap_or_else(|| "invalid timestamp".into())
 }
 
-pub fn result_lines(result: &LookupResult) -> Vec<String> {
-    let mut lines = vec![
-        format!("{} · {}", safe_text(&result.headword), result.pair),
-        String::new(),
-    ];
-    for (index, candidate) in result.candidates.iter().take(CANDIDATE_LIMIT).enumerate() {
-        let prefix = if candidate.prefix.is_empty() {
-            String::new()
+pub fn values(result: &LookupResult, index: Option<usize>) -> Option<String> {
+    let value = |c: &crate::domain::TranslationCandidate| {
+        let prefix = safe_text(&c.prefix);
+        if prefix.is_empty() {
+            safe_text(&c.text)
         } else {
-            format!("{} ", safe_text(&candidate.prefix))
-        };
-        let duplicate_text = result
-            .candidates
-            .iter()
-            .filter(|other| other.normalized == candidate.normalized)
-            .count()
-            > 1;
-        let label = if duplicate_text {
-            let mut labels = Vec::new();
-            if let Some(pos) = &candidate.part_of_speech {
-                labels.push(safe_text(&pos.to_lowercase()));
-            }
-            if let Some(meaning) = candidate
-                .sense
-                .as_ref()
-                .or(candidate.back_translations.first())
-            {
-                let meaning = safe_text(meaning);
-                let mut short: String = meaning.graphemes(true).take(72).collect();
-                if short.len() < meaning.len() {
-                    short.push('…');
-                }
-                labels.push(short);
-            }
-            if labels.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", labels.join("; "))
-            }
-        } else {
-            String::new()
-        };
-        lines.push(format!(
-            "{}. {}{}{}",
-            index + 1,
-            prefix,
-            safe_text(&candidate.text),
-            label
-        ));
+            format!("{} {}", prefix, safe_text(&c.text))
+        }
+    };
+    match index {
+        Some(i) => result.candidates.get(i).map(value),
+        None => Some(
+            result
+                .candidates
+                .iter()
+                .map(value)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
     }
-    if result.candidates.len() > CANDIDATE_LIMIT {
-        lines.push(format!(
-            "… {} more candidates omitted.",
-            result.candidates.len() - CANDIDATE_LIMIT
-        ));
-    }
-    if let Some(attribution) = &result.attribution {
-        lines.push(safe_text(attribution));
-    }
-    lines
 }
 
-pub fn render_result(result: &LookupResult) -> String {
-    format!("{}\n", result_lines(result).join("\n"))
+/// Keep frontend advice and persisted diagnostic wording stable across adapters.
+pub(crate) fn lookup_error_text(error: &crate::lookup::LookupError) -> String {
+    use crate::lookup::LookupError;
+    match error {
+        LookupError::Ambiguous(_) => {
+            format!("{error} Choose --from de or --from en (Source in the TUI).")
+        }
+        LookupError::Undetermined(_) => {
+            format!("{error} Check spelling or specify --from de / --from en (Source in the TUI).")
+        }
+        _ => error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::*;
+    #[test]
+    fn copies_plain_values_including_prefix_without_control_sequences() {
+        let result = LookupResult {
+            query: "word".into(),
+            headword: "word".into(),
+            normalized_headword: "word".into(),
+            pair: INITIAL_PAIRS[0],
+            candidates: vec![
+                TranslationCandidate {
+                    text: "hello\u{202e}".into(),
+                    normalized: "hello".into(),
+                    part_of_speech: None,
+                    sense: Some("not copied".into()),
+                    prefix: "the".into(),
+                    back_translations: vec![],
+                },
+                TranslationCandidate {
+                    text: "world".into(),
+                    normalized: "world".into(),
+                    part_of_speech: None,
+                    sense: None,
+                    prefix: String::new(),
+                    back_translations: vec![],
+                },
+            ],
+            provider: "fixture".into(),
+            attribution: None,
+            kind: ResultKind::Dictionary,
+        };
+        assert_eq!(values(&result, Some(0)).as_deref(), Some("the hello"));
+        assert_eq!(values(&result, None).as_deref(), Some("the hello\nworld"));
+        assert!(values(&result, Some(9)).is_none());
+    }
 }

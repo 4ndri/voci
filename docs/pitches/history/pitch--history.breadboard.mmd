@@ -1,0 +1,48 @@
+flowchart TB
+    subgraph terminal["Terminal prompt"]
+        cli["voci history / search · --today · --limit"]
+        launch["voci shell"]
+    end
+    subgraph printed["CLI history"]
+        rows["Saved encounters or empty result · rerun with filters"]
+    end
+    subgraph lookup["Lookup tab"]
+        input["Word · languages · submit"]
+        recent["Recent lookups · select an encounter"]
+        preview["Lookup details · live result or saved preview"]
+        historyTab["Switch to History · gt"]
+    end
+    subgraph history["History tab"]
+        list["Detailed encounter list · select / scroll"]
+        filterKey["Open filters · /"]
+        lookupTab["Switch to Lookup · gt"]
+    end
+    subgraph detail["History details · beside list or stacked below"]
+        saved["Saved query · translations · languages · provider · time"]
+        copy["Copy query / value / all values · yq / yy / ya"]
+        feedback["Copied · or clipboard unavailable"]
+    end
+    subgraph dialog["Filter dialog"]
+        fields["Text · all history / today"]
+        apply["Apply / clear filters"]
+        cancel["Cancel · keep previous filters"]
+    end
+    subgraph recovery["History unavailable or empty"]
+        problem["Empty: adjust filters · storage error: resolve and retry"]
+    end
+    cli --> rows
+    launch --> input
+    input -->|"Record start / lookup / outcome"| preview
+    recent -->|"Preview saved result only"| preview
+    historyTab --> list
+    lookupTab --> input
+    list --> saved
+    filterKey --> fields
+    apply --> list
+    cancel --> list
+    copy --> feedback
+    preview -->|"Same copy actions"| feedback
+    cli -->|"Storage error"| problem
+    list -->|"No matches / storage error"| problem
+    problem -->|"Change filters"| fields
+    problem -->|"Retry / return"| list

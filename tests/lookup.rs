@@ -1,12 +1,13 @@
+use voci::lookup::{LookupError, LookupRequest};
 mod support;
 
 use serde_json::json;
 use std::time::Duration;
 use voci::{
-    app::LookupService,
+    cli::render_result,
     domain::*,
-    presentation::render_result,
-    provider::{DictionaryProvider, MicrosoftProvider},
+    lookup::LookupService,
+    lookup::{DictionaryProvider, providers::MicrosoftProvider},
 };
 use wiremock::{
     Mock, MockServer, ResponseTemplate,

@@ -1,7 +1,9 @@
 //! Local WikDict SQLite dictionaries. No queries or credentials are sent to WikDict.
+
+use crate::lookup::{LookupError, validate_query};
 use crate::{
-    domain::*,
-    provider::{DictionaryProvider, ProviderCapabilities},
+    domain::{INITIAL_PAIRS, LanguagePair, LookupResult, ResultKind, TranslationCandidate},
+    lookup::{DictionaryProvider, ProviderCapabilities},
 };
 use caseless::Caseless;
 use reqwest::Client;
@@ -17,7 +19,7 @@ use unicode_normalization::UnicodeNormalization;
 
 pub const RELEASE: &str = "2_2026-06";
 pub const DOWNLOAD_BASE: &str = "https://download.wikdict.com/dictionaries/sqlite";
-pub const ATTRIBUTION: &str = "WikDict by Karl Bartel · Wiktionary contributors via DBnary · CC BY-SA 4.0 · https://www.wikdict.com/page/download";
+pub const ATTRIBUTION: &str = "WikDict by Karl Bartel · Wiktionary contributors via DBnary · CC BY-SA 4.0 · https://www.wikdict.com/page/download · https://creativecommons.org/licenses/by-sa/4.0/ · Selected and formatted by voci";
 const MAX_DOWNLOAD: u64 = 64 * 1024 * 1024;
 const SELECT: &str = "SELECT written_rep, sense, trans_list FROM translation
     WHERE voci_fold_v2(written_rep) = ?1
@@ -41,7 +43,8 @@ impl WikDictProvider {
         }
     }
 
-    /// Prepare both directions once, before entering the TUI or starting the lookup deadline.
+    /// Prepare both directions before starting the first lookup deadline.
+    /// The coordinator reuses successful preparation within a shell session.
     pub async fn prepare(&self, progress: impl Fn(&str)) -> Result<(), LookupError> {
         std::fs::create_dir_all(&self.directory)
             .map_err(|_| storage_error(&self.directory, "Cannot create dictionary directory"))?;

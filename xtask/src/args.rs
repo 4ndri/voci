@@ -13,6 +13,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Task {
+    /// Set up Tab completion for all supported shells, or one selected shell
+    #[command(name = "setup:completions")]
+    SetupCompletions {
+        #[arg(long, value_enum)]
+        shell: Option<crate::completions::Shell>,
+    },
     /// Print GitVersion SemVer
     Version {
         /// Require this tag to equal v plus GitVersion SemVer
@@ -58,7 +64,7 @@ pub enum Task {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
     },
-    /// Install or update voci (release by default)
+    /// Install or update voci and shell completions (release by default)
     Install {
         #[command(flatten)]
         common: Common,

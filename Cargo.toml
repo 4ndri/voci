@@ -10,6 +10,9 @@ default-members = ["."]
 resolver = "3"
 
 [dependencies]
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
 # Persisted dictionary indexes depend on this version's Unicode case-folding data.
 caseless = "=0.2.2"
 clap = { version = "4", features = ["derive"] }
@@ -18,7 +21,8 @@ directories = "6"
 futures-util = "0.3"
 ratatui = "0.30.2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query", "system-proxy"] }
-rusqlite = { version = "0.38", features = ["bundled", "functions"] }
+# Bundled SQLite must include the WAL-reset fix (3.51.3 or newer).
+rusqlite = { version = "0.40.2", features = ["bundled", "functions"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -29,6 +33,7 @@ toml = "0.8"
 unicode-segmentation = "1"
 unicode-normalization = "0.1"
 unicode-width = "0.2"
+edtui = { version = "0.11.7", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2"

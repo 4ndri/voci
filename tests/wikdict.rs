@@ -1,13 +1,15 @@
-use assert_cmd::cargo::cargo_bin_cmd;
+use voci::lookup::{LookupError, LookupRequest};
+#[path = "support/commands.rs"]
+mod support;
 use predicates::prelude::*;
 use rusqlite::{Connection, functions::FunctionFlags};
 use std::{path::Path, time::Duration};
 use unicode_normalization::UnicodeNormalization;
 use voci::{
-    app::LookupService,
     domain::*,
-    provider::DictionaryProvider,
-    wikdict::{RELEASE, WikDictProvider},
+    lookup::DictionaryProvider,
+    lookup::LookupService,
+    lookup::providers::{RELEASE, WikDictProvider},
 };
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -319,7 +321,7 @@ fn cli_defaults_to_keyless_wikdict_and_supports_provider_overrides() {
     let mut value = toml::Value::Table(value);
     value["wikdict"]["data_dir"] = toml::Value::String(root.path().to_str().unwrap().into());
     std::fs::write(&config, toml::to_string(&value).unwrap()).unwrap();
-    let mut command = cargo_bin_cmd!("voci");
+    let mut command = support::command();
     command
         .env_remove("VOCI_MICROSOFT_KEY")
         .env("VOCI_MICROSOFT_REGION", "irrelevant invalid region")
@@ -332,8 +334,40 @@ fn cli_defaults_to_keyless_wikdict_and_supports_provider_overrides() {
             predicate::str::contains("1. liability").and(predicate::str::contains("CC BY-SA 4.0")),
         )
         .stderr("");
+    let output = support::command()
+        .arg("--config")
+        .arg(&config)
+        .args(["--json", "Verbindlichkeit"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    assert!(output.stderr.is_empty());
+    let result: voci::domain::LookupResult = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result.query, "Verbindlichkeit");
+    assert_eq!(result.candidates[0].text, "liability");
+    assert_eq!(
+        result.attribution.as_deref(),
+        Some(voci::lookup::providers::ATTRIBUTION)
+    );
+    let output = support::command()
+        .arg("--config")
+        .arg(&config)
+        .args(["--json", "--from", "de", "absent"])
+        .assert()
+        .code(1)
+        .get_output()
+        .clone();
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("No entry found")
+    );
     for (query, expected) in [("STRASSE", "street"), ("GRÜSSE", "greetings")] {
-        cargo_bin_cmd!("voci")
+        support::command()
             .arg("--config")
             .arg(&config)
             .arg(query)
@@ -342,7 +376,7 @@ fn cli_defaults_to_keyless_wikdict_and_supports_provider_overrides() {
             .stdout(predicate::str::contains(format!("1. {expected}")))
             .stderr("");
     }
-    let mut command = cargo_bin_cmd!("voci");
+    let mut command = support::command();
     command
         .env_remove("VOCI_MICROSOFT_KEY")
         .arg("--config")
@@ -356,7 +390,7 @@ fn cli_defaults_to_keyless_wikdict_and_supports_provider_overrides() {
         .unwrap()
         .insert("provider".into(), toml::Value::String("microsoft".into()));
     std::fs::write(&config, toml::to_string(&value).unwrap()).unwrap();
-    let mut command = cargo_bin_cmd!("voci");
+    let mut command = support::command();
     command
         .env_remove("VOCI_MICROSOFT_KEY")
         .arg("--config")
@@ -445,5 +479,68 @@ async fn concurrent_first_runs_install_complete_dictionaries() {
             .unwrap()
             .candidates
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn coordinator_retries_failed_preparation_and_reuses_success_across_submissions() {
+    use voci::{app::Coordinator, config::Config};
+    let root = tempfile::tempdir().unwrap();
+    installed(root.path());
+    let reverse = root.path().join(RELEASE).join("en-de.sqlite3");
+    std::fs::write(&reverse, b"broken dictionary").unwrap();
+    let mut config = Config::from_sources(None, None, None).unwrap();
+    config.wikdict_data_dir = Some(root.path().into());
+    let mut coordinator = Coordinator::new(None, None, Some(root.path().join("history.db")));
+    coordinator = coordinator.with_config(config);
+    let (_cancel, receiver) = tokio::sync::watch::channel(false);
+    let request = LookupRequest {
+        query: "Verbindlichkeit".into(),
+        from: Some(Language::German),
+        to: None,
+    };
+    // Construction remains lazy; failed initialization must be retried.
+    assert!(!root.path().join("history.db").exists());
+    assert!(matches!(
+        coordinator
+            .record_lookup(request.clone(), receiver.clone(), None)
+            .await
+            .result,
+        Err(LookupError::Dictionary(_))
+    ));
+    std::fs::remove_file(&reverse).unwrap();
+    fixture(&reverse, false);
+    assert!(
+        coordinator
+            .record_lookup(request.clone(), receiver.clone(), None)
+            .await
+            .result
+            .is_ok()
+    );
+    // If each submission prepared both dictionaries again, this would fail.
+    std::fs::write(&reverse, b"broken dictionary").unwrap();
+    assert!(
+        coordinator
+            .clone()
+            .record_lookup(request, receiver, None)
+            .await
+            .result
+            .is_ok()
+    );
+    let entries = coordinator
+        .history()
+        .unwrap()
+        .page(Default::default(), None, 20, false)
+        .await
+        .unwrap()
+        .entries;
+    assert_eq!(entries.len(), 3);
+    assert!(entries.iter().all(|entry| entry.finished.is_some()));
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.result().is_some())
+            .count(),
+        2
     );
 }
