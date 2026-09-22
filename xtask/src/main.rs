@@ -266,7 +266,11 @@ fn package(
     }
     let output_dir = std::path::absolute(output_dir)?;
     fs::create_dir_all(&output_dir)?;
-    let documents = ["README.md", "docs/pitches/lookup/wikdict-attribution.md"];
+    let documents = [
+        "README.md",
+        "LICENSE",
+        "docs/pitches/lookup/wikdict-attribution.md",
+    ];
     let mut files = vec![
         (
             binary.clone(),

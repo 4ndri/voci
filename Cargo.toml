@@ -3,6 +3,7 @@ name = "voci"
 version = "0.1.0"
 edition = "2024"
 description = "Terminal-first dictionary lookup"
+license = "MIT"
 
 [workspace]
 members = ["xtask"]

@@ -32,6 +32,7 @@ fn fixture(root: &Path, options: &Options) {
     fs::create_dir_all(attribution.parent().unwrap()).unwrap();
     fs::write(attribution, "Attribution").unwrap();
     fs::write(root.join("README.md"), "Documentation").unwrap();
+    fs::write(root.join("LICENSE"), include_str!("../../LICENSE")).unwrap();
 }
 
 #[test]
@@ -189,12 +190,18 @@ fn tar_contains_versioned_executable_attribution_and_checksums() {
             let receipt: Receipt = serde_json::from_reader(&mut entry).unwrap();
             assert_eq!(receipt.info, info());
         }
+        if path.ends_with("/LICENSE") {
+            let mut license = String::new();
+            entry.read_to_string(&mut license).unwrap();
+            assert_eq!(license, include_str!("../../LICENSE"));
+        }
         names.push(path);
     }
     assert!(names.contains(&format!(
         "{name}/docs/pitches/lookup/wikdict-attribution.md"
     )));
-    assert_eq!(names.len(), 4);
+    assert!(names.contains(&format!("{name}/LICENSE")));
+    assert_eq!(names.len(), 5);
     let checksum =
         fs::read_to_string(path.with_file_name(format!("{name}.tar.gz.sha256"))).unwrap();
     assert_eq!(
@@ -225,6 +232,12 @@ fn windows_archive_is_zip_and_dev_name_is_distinct() {
         .read_to_end(&mut bytes)
         .unwrap();
     assert_eq!(bytes, b"executable fixture");
+    let mut license = String::new();
+    zip.by_name(&format!("{name}/LICENSE"))
+        .unwrap()
+        .read_to_string(&mut license)
+        .unwrap();
+    assert_eq!(license, include_str!("../../LICENSE"));
 }
 
 #[test]
