@@ -67,14 +67,97 @@ fn db_path(home: &Path) -> PathBuf {
         home.join("voci/voci.db")
     }
 }
-#[tokio::test]
-async fn nushell_completion_decodes_open_quotes_and_quoted_database_paths() {
+fn nushell_available() -> bool {
     match std::process::Command::new("nu").arg("--version").output() {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             eprintln!("Skipping Nushell adapter check; nu is not installed");
-            return;
+            false
         }
-        result => assert!(result.unwrap().status.success()),
+        result => {
+            assert!(result.unwrap().status.success());
+            true
+        }
+    }
+}
+
+#[test]
+fn nushell_completion_preserves_previous_completer_inputs_and_file_fallback() {
+    if !nushell_available() {
+        return;
+    }
+    for (previous, expected) in [
+        (
+            "{|place| if $place.command == ['voci-test-other' pref] { [preferred] } else { [] } }",
+            "preferred",
+        ),
+        (
+            "{|token| if $token.text == 'pref' { [preferred] } else { [] } }",
+            "preferred",
+        ),
+        (
+            "{|buffer| if $buffer == 'voci-test-other pref' { [preferred] } else { [] } }",
+            "preferred",
+        ),
+        (
+            "{|buffer, token, place| if $buffer == 'voci-test-other pref' and $token.text == 'pref' and $place.command == ['voci-test-other' pref] { {completions: [preferred], fallback: false} } else { [] } }",
+            "preferred",
+        ),
+        (
+            "{|spans| if $spans == ['voci-test-other' pref] { [preferred] } else { [] } }",
+            "preferred",
+        ),
+        ("{|place| null }", "./Cargo.toml"),
+        ("null", "./Cargo.toml"),
+    ] {
+        let prefix = if expected == "preferred" {
+            "pref"
+        } else {
+            "./Cargo.to"
+        };
+        let script = format!(
+            r#"$env.config.completions.external.completer = {previous}
+source assets/completions/voci.nu
+let other = ('voci-test-other {prefix}' | commandline complete)
+let own = ($"($env.VOCI_TEST_BINARY) --fro" | commandline complete)
+{{other: $other, own: $own}} | to json"#
+        );
+        let output = std::process::Command::new("nu")
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args(["--no-config-file", "-c", &script])
+            .env("VOCI_TEST_BINARY", assert_cmd::cargo::cargo_bin!("voci"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "previous: {previous}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if previous.starts_with("{|spans|") {
+            // Nushell still warns about the user's legacy closure, not the voci adapter.
+            assert!(
+                String::from_utf8_lossy(&output.stderr)
+                    .contains("Positional completer input deprecated")
+            );
+        } else {
+            assert!(
+                output.stderr.is_empty(),
+                "previous: {previous}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            actual,
+            serde_json::json!({"other": [expected], "own": ["--from"]}),
+            "previous: {previous}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn nushell_completion_decodes_open_quotes_and_quoted_database_paths() {
+    if !nushell_available() {
+        return;
     }
     let root = tempfile::tempdir().unwrap();
     let store = HistoryStore::new(root.path().join("saved history.db"));
@@ -119,11 +202,16 @@ async fn nushell_completion_decodes_open_quotes_and_quoted_database_paths() {
         .collect();
     let output = std::process::Command::new("nu")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(["--no-config-file", "-c", "source assets/completions/voci.nu; $env.VOCI_TEST_SPANS | from json | each {|spans| do $env.config.completions.external.completer $spans } | to json"])
+        .args(["--no-config-file", "-c", "source assets/completions/voci.nu; $env.VOCI_TEST_SPANS | from json | each {|spans| $spans | str join ' ' | collect | commandline complete --detailed | each {|value| {value: $value.value, description: $value.description} } } | to json"])
         .env("VOCI_TEST_SPANS", serde_json::to_string(&spans).unwrap())
         .output().unwrap();
     assert!(
         output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
