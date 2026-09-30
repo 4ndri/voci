@@ -1,7 +1,8 @@
 # Source after any existing external-completer configuration.
 let voci_previous_completer = $env.config.completions.external.completer
 $env.config.completions.external.enable = true
-$env.config.completions.external.completer = {|spans|
+$env.config.completions.external.completer = {|place, buffer|
+    let spans = $place.command
     if (($spans | first | path basename) in ['voci' 'voci.exe']) {
         try {
             # Nushell passes shell syntax in spans, including an unfinished opening quote.
@@ -27,7 +28,12 @@ $env.config.completions.external.completer = {|spans|
             }
         } catch { [] }
     } else if $voci_previous_completer != null {
-        do $voci_previous_completer $spans
+        # Let Nushell bind the previous completer's named inputs (or legacy spans).
+        # Keep this override local so subsequent voci completions still use this adapter.
+        do {
+            $env.config.completions.external.completer = $voci_previous_completer
+            $buffer | commandline complete --detailed
+        }
     } else {
         null
     }
